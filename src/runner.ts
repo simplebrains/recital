@@ -1,6 +1,11 @@
 /**
- * The runner drives a persistent shell through a parsed document's blocks,
- * matches output against expectations, and threads captured bindings forward.
+ * The runner drives persistent shell sessions through a parsed document's
+ * blocks, matches output against expectations, and threads captured bindings
+ * forward within each session.
+ *
+ * A document may declare several sessions (one per non-`isolate` directive);
+ * blocks are dispatched to the session of the directive that owns them, but are
+ * always executed in document order, even when sessions are interleaved.
  */
 
 import {
@@ -19,16 +24,12 @@ import type {
   Interaction,
   InteractionResult,
   ParsedDocument,
+  RecitalDirective,
 } from "./types.js";
 
 export interface RunnerOptions extends ShellOptions {
   /** Output normalization options. */
   normalize?: NormalizeOptions;
-  /**
-   * When true, every command must exit 0 unless its block overrides with an
-   * `exit=` fence option. Default false (output is asserted, exit code is not).
-   */
-  expectSuccess?: boolean;
 }
 
 function formatMismatch(
@@ -52,8 +53,8 @@ function formatMismatch(
 }
 
 /**
- * A stateful runner holding one shell session and the document-wide bindings.
- * Callers may run block-by-block (sharing state) or use `runDocument`.
+ * A stateful runner holding one shell session and its bindings. Blocks run on
+ * it in sequence share working directory, environment, and captured bindings.
  */
 export class Runner {
   readonly session: ShellSession;
@@ -65,19 +66,8 @@ export class Runner {
     this.session = new ShellSession(options);
   }
 
-  private expectedExit(block: Block): number | null {
-    if ("exit" in block.options) {
-      const n = Number.parseInt(block.options.exit!, 10);
-      return Number.isNaN(n) ? null : n;
-    }
-    return this.options.expectSuccess ? 0 : null;
-  }
-
   /** Run one interaction against the current session and bindings. */
-  async runInteraction(
-    interaction: Interaction,
-    expectedExit: number | null,
-  ): Promise<InteractionResult> {
+  async runInteraction(interaction: Interaction): Promise<InteractionResult> {
     let executed: string;
     try {
       executed = substituteBindings(interaction.command, this.bindings);
@@ -95,17 +85,7 @@ export class Runner {
     const { output, exitCode } = await this.session.run(executed);
     const actual = normalizeOutput(output, this.options.normalize);
 
-    if (expectedExit !== null && exitCode !== expectedExit) {
-      return {
-        interaction,
-        executed,
-        ok: false,
-        exitCode,
-        output,
-        error: `Expected exit code ${expectedExit} but command exited ${exitCode}.\n  $ ${executed}\n--- output ---\n${actual.map((l) => "  " + l).join("\n")}`,
-      };
-    }
-
+    // recital asserts output, not exit status; the exit code is informational.
     const match = matchBlock(interaction.expected, actual, this.bindings);
     if (!match.ok) {
       return {
@@ -125,17 +105,9 @@ export class Runner {
   /** Run a whole block, stopping at the first failing interaction. */
   async runBlock(block: Block): Promise<BlockResult> {
     const results: InteractionResult[] = [];
-    if ("skip" in block.options) {
-      return { block, ok: true, interactions: results };
-    }
-    if (block.options.cwd) {
-      await this.session.run(`cd ${JSON.stringify(block.options.cwd)}`);
-    }
-
-    const expectedExit = this.expectedExit(block);
     let ok = true;
     for (const interaction of block.interactions) {
-      const result = await this.runInteraction(interaction, expectedExit);
+      const result = await this.runInteraction(interaction);
       results.push(result);
       if (!result.ok) {
         ok = false;
@@ -159,22 +131,41 @@ export async function runDocument(
   return runParsedDocument(parsed, options);
 }
 
-/** Run an already-parsed document end-to-end with a fresh session. */
+/**
+ * Run an already-parsed document end-to-end. Each non-`isolate` directive gets
+ * one persistent session shared by its blocks; `isolate` directives get a fresh
+ * session per block. Blocks with no matching directive are skipped.
+ */
 export async function runParsedDocument(
   parsed: ParsedDocument,
   options: RunnerOptions = {},
 ): Promise<DocumentResult> {
-  const runner = new Runner(options);
+  const sessions = new Map<RecitalDirective, Runner>();
   const blocks: BlockResult[] = [];
   let ok = true;
+
   try {
     for (const block of parsed.blocks) {
+      const directive = block.directive;
+      if (!directive) continue; // not owned by any directive: recital ignores it
+
+      let runner: Runner;
+      if (directive.isolate) {
+        runner = new Runner({ ...options, shell: directive.cmd });
+      } else {
+        runner = sessions.get(directive) ?? new Runner({ ...options, shell: directive.cmd });
+        sessions.set(directive, runner);
+      }
+
       const result = await runner.runBlock(block);
+      if (directive.isolate) await runner.close();
+
       blocks.push(result);
       if (!result.ok) ok = false;
     }
   } finally {
-    await runner.close();
+    for (const runner of sessions.values()) await runner.close();
   }
+
   return { path: parsed.path, ok, blocks };
 }

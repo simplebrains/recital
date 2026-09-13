@@ -29,19 +29,23 @@ Usage:
   recital <files|dirs|globs...>            (run is the default command)
 
 Options:
-  --expect-success     Require every command to exit 0 (unless a block sets exit=).
-  --shell <path>       Shell executable to drive (default: bash).
-  --cwd <dir>          Working directory for the session.
-  --lang <name>        Additional runnable code-fence language (repeatable).
+  --cwd <dir>          Working directory for the sessions.
   -h, --help           Show this help.
   -v, --version        Show version.
 
-A runnable block is a fenced code block tagged \`console\` (or a --lang value):
+A document opts in to being run with a directive comment. recital interprets
+nothing unless one is present:
+
+  <!-- recital syntax=console cmd=bash -->
 
   \`\`\`console
   $ echo hello
   hello
   \`\`\`
+
+Directive attributes: cmd=<shell> (required), syntax=<fence-language>,
+pragma=<text the fence must contain>, and the isolate flag (fresh session per
+block). Directives are file-global; blocks run in document order.
 
 Matcher tokens in expected output: {{name:type}} captures, {{name}} back-refs,
 {{:type}} / {{*}} anonymous wildcards; a lone \`...\` line skips arbitrary lines.
@@ -49,7 +53,7 @@ Matcher tokens in expected output: {{name:type}} captures, {{name}} back-refs,
 
 interface ParsedArgs {
   files: string[];
-  options: RunnerOptions & { languages?: string[] };
+  options: RunnerOptions;
   help: boolean;
   version: boolean;
 }
@@ -59,7 +63,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (args[0] === "run") args.shift();
 
   const files: string[] = [];
-  const options: RunnerOptions & { languages?: string[] } = {};
+  const options: RunnerOptions = {};
   let help = false;
   let version = false;
 
@@ -74,17 +78,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--version":
         version = true;
         break;
-      case "--expect-success":
-        options.expectSuccess = true;
-        break;
-      case "--shell":
-        options.shell = args[++i];
-        break;
       case "--cwd":
         options.cwd = args[++i];
-        break;
-      case "--lang":
-        (options.languages ??= ["console"]).push(args[++i]!);
         break;
       default:
         if (arg.startsWith("-")) {
@@ -103,8 +98,7 @@ function reportBlock(result: BlockResult): boolean {
     : c.dim(`block at line ${result.block.line}`);
 
   if (result.ok) {
-    const skipped = "skip" in result.block.options;
-    console.log(`  ${skipped ? c.dim("○ skip") : c.green("✓")} ${name}`);
+    console.log(`  ${c.green("✓")} ${name}`);
     return true;
   }
 
@@ -149,8 +143,19 @@ async function main(): Promise<number> {
   let total = 0;
   for (const file of files) {
     const source = readFileSync(file, "utf8");
-    const doc = parseMarkdown(source, { path: file, languages: parsed.options.languages });
-    if (doc.blocks.length === 0) continue;
+
+    let doc;
+    try {
+      doc = parseMarkdown(source, { path: file });
+    } catch (err) {
+      total++;
+      failed++;
+      console.log(c.red(c.bold(file)));
+      console.log("  " + c.red(String((err as Error).message)));
+      continue;
+    }
+
+    if (!doc.blocks.some((b) => b.directive)) continue;
     total++;
     const result = await runParsedDocument(doc, parsed.options);
     reportDocument(result);
@@ -158,7 +163,7 @@ async function main(): Promise<number> {
   }
 
   if (total === 0) {
-    console.error("No runnable blocks found.");
+    console.error("No documents with a recital directive were found.");
     return 1;
   }
 

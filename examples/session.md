@@ -1,5 +1,7 @@
 # A stateful session
 
+<!-- recital syntax=console cmd=bash -->
+
 The session keeps its working directory between commands, and can capture
 nondeterministic values into named bindings that later steps reuse.
 

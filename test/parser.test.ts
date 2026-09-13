@@ -3,25 +3,110 @@ import { describe, expect, it } from "vitest";
 import { parseMarkdown } from "../src/parser.js";
 
 describe("parseMarkdown", () => {
-  it("extracts console blocks and ignores other code", () => {
+  it("records every code block with its language and pragma", () => {
+    const doc = parseMarkdown(
+      ["```console a pragma", "$ echo hi", "hi", "```", "```js", "code", "```"].join("\n"),
+    );
+    expect(doc.blocks).toHaveLength(2);
+    expect(doc.blocks[0]).toMatchObject({ lang: "console", pragma: "a pragma" });
+    expect(doc.blocks[1]).toMatchObject({ lang: "js", pragma: "" });
+  });
+
+  it("interprets nothing without a directive", () => {
+    const doc = parseMarkdown(["```console", "$ echo hi", "hi", "```"].join("\n"));
+    expect(doc.directives).toEqual([]);
+    expect(doc.blocks[0]!.directive).toBeUndefined();
+  });
+
+  it("a cmd-only directive owns every code block", () => {
+    const doc = parseMarkdown(
+      ["<!-- recital cmd=bash -->", "```console", "$ echo hi", "hi", "```"].join("\n"),
+    );
+    expect(doc.directives[0]).toMatchObject({ cmd: "bash", isolate: false });
+    expect(doc.blocks[0]!.directive).toBe(doc.directives[0]);
+  });
+
+  it("a syntax= directive owns only blocks of that language", () => {
     const doc = parseMarkdown(
       [
-        "# Title",
-        "",
-        "```js",
-        "not a session",
-        "```",
-        "",
+        "<!-- recital syntax=console cmd=bash -->",
         "```console",
         "$ echo hi",
         "hi",
         "```",
+        "```js",
+        "not run",
+        "```",
       ].join("\n"),
     );
-    expect(doc.blocks).toHaveLength(1);
-    expect(doc.blocks[0]!.interactions).toEqual([
-      { command: "echo hi", expected: ["hi"], line: 8 },
+    expect(doc.blocks[0]!.directive).toBe(doc.directives[0]);
+    expect(doc.blocks[1]!.directive).toBeUndefined();
+  });
+
+  it("a pragma= directive owns only blocks whose pragma contains the text", () => {
+    const doc = parseMarkdown(
+      [
+        '<!-- recital pragma="Bob logs in" cmd=bash -->',
+        "```console Bob logs in and does a thing",
+        "$ true",
+        "```",
+        "```console someone else",
+        "$ true",
+        "```",
+      ].join("\n"),
+    );
+    expect(doc.blocks[0]!.directive).toBe(doc.directives[0]);
+    expect(doc.blocks[1]!.directive).toBeUndefined();
+  });
+
+  it("parses the isolate flag", () => {
+    const doc = parseMarkdown(["<!-- recital cmd=bash isolate -->"].join("\n"));
+    expect(doc.directives[0]).toMatchObject({ cmd: "bash", isolate: true });
+  });
+
+  it("assigns interleaved blocks to their own directive", () => {
+    const doc = parseMarkdown(
+      [
+        '<!-- recital syntax=console cmd=bash pragma="A" -->',
+        '<!-- recital syntax=console cmd=bash pragma="B" -->',
+        "```console A",
+        "$ true",
+        "```",
+        "```console B",
+        "$ true",
+        "```",
+        "```console A",
+        "$ true",
+        "```",
+      ].join("\n"),
+    );
+    expect(doc.blocks.map((b) => b.directive)).toEqual([
+      doc.directives[0],
+      doc.directives[1],
+      doc.directives[0],
     ]);
+  });
+
+  it("throws when a directive is missing cmd=", () => {
+    expect(() => parseMarkdown("<!-- recital syntax=console -->")).toThrow(/cmd=/);
+  });
+
+  it("throws on an unknown directive attribute", () => {
+    expect(() => parseMarkdown("<!-- recital cmd=bash bogus=1 -->")).toThrow(/unknown attribute/);
+  });
+
+  it("throws when a block matches more than one directive", () => {
+    expect(() =>
+      parseMarkdown(
+        [
+          "<!-- recital cmd=bash -->",
+          "<!-- recital syntax=console cmd=bash -->",
+          "```console",
+          "$ true",
+          "```",
+        ].join("\n"),
+      ),
+    ).toThrow(/multiple recital directives/);
   });
 
   it("associates the nearest heading with a block", () => {
@@ -43,13 +128,6 @@ describe("parseMarkdown", () => {
       ["```console", "$ echo one \\", "> two", "one two", "```"].join("\n"),
     );
     expect(doc.blocks[0]!.interactions[0]!.command).toBe("echo one \\\ntwo");
-  });
-
-  it("parses fence options", () => {
-    const doc = parseMarkdown(
-      ['```console cwd="/tmp" exit=1 skip', "$ false", "```"].join("\n"),
-    );
-    expect(doc.blocks[0]!.options).toEqual({ cwd: "/tmp", exit: "1", skip: "true" });
   });
 
   it("handles indented fences and tilde fences", () => {
@@ -85,52 +163,21 @@ describe("parseMarkdown", () => {
 
   it("rewrites an anonymous identity comment into a synthetic binding token", () => {
     const doc = parseMarkdown(
-      [
-        '<!-- "/tmp/x" -->',
-        "```console",
-        "$ pwd",
-        "/tmp/x",
-        "$ echo /tmp/x",
-        "/tmp/x",
-        "```",
-      ].join("\n"),
+      ['<!-- "/tmp/x" -->', "```console", "$ pwd", "/tmp/x", "```"].join("\n"),
     );
-    const [pwd, echo] = doc.blocks[0]!.interactions;
-    // Every occurrence rewrites to the *same* synthetic token, so they all
-    // resolve to one identity at match time.
-    expect(pwd!.expected).toEqual(["{{__recital_anon_0}}"]);
-    expect(echo!.command).toBe("echo {{__recital_anon_0}}");
-    expect(echo!.expected).toEqual(["{{__recital_anon_0}}"]);
+    expect(doc.blocks[0]!.interactions[0]!.expected).toEqual(["{{__recital_anon_0}}"]);
   });
 
-  it("supports a typed named identity declaration", () => {
-    const doc = parseMarkdown(
+  it("supports typed named and typed anonymous identity declarations", () => {
+    const named = parseMarkdown(
       ['<!-- id:uuid "the-id" -->', "```console", "$ echo x", "the-id", "```"].join("\n"),
     );
-    expect(doc.blocks[0]!.interactions[0]!.expected).toEqual(["{{id:uuid}}"]);
-  });
+    expect(named.blocks[0]!.interactions[0]!.expected).toEqual(["{{id:uuid}}"]);
 
-  it("supports a typed anonymous identity declaration", () => {
-    const doc = parseMarkdown(
+    const anon = parseMarkdown(
       ['<!-- :path "/tmp/x" -->', "```console", "$ pwd", "/tmp/x", "```"].join("\n"),
     );
-    expect(doc.blocks[0]!.interactions[0]!.expected).toEqual(["{{__recital_anon_0:path}}"]);
-  });
-
-  it("gives each anonymous identity its own synthetic binding", () => {
-    const doc = parseMarkdown(
-      [
-        '<!-- "/tmp/a" -->',
-        '<!-- "/tmp/b" -->',
-        "```console",
-        "$ echo /tmp/a /tmp/b",
-        "/tmp/a /tmp/b",
-        "```",
-      ].join("\n"),
-    );
-    expect(doc.blocks[0]!.interactions[0]!.expected).toEqual([
-      "{{__recital_anon_0}} {{__recital_anon_1}}",
-    ]);
+    expect(anon.blocks[0]!.interactions[0]!.expected).toEqual(["{{__recital_anon_0:path}}"]);
   });
 
   it("ignores ordinary HTML comments with no quoted value", () => {

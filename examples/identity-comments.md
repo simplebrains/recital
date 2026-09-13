@@ -1,5 +1,7 @@
 # Keeping the session literal
 
+<!-- recital syntax=console cmd=bash -->
+
 Sometimes `{{name}}` markup inside a block spoils the illusion of a real
 terminal session. Instead, declare a value to be *an identity to itself* in an
 HTML comment *outside* the fence — invisible when the Markdown is rendered — by

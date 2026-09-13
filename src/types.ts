@@ -2,7 +2,27 @@
  * Shared type definitions for recital.
  */
 
-/** A single command + its expected output, as parsed from a `console` block. */
+/**
+ * A `<!-- recital … -->` directive: a session configuration declared in the
+ * document. It selects which fenced code blocks recital interprets, and how.
+ */
+export interface RecitalDirective {
+  /** The command used to drive the session (e.g. `bash`). Required. */
+  cmd: string;
+  /** Only match blocks whose fence language equals this, if set. */
+  syntax?: string;
+  /** Only match blocks whose fence pragma contains this substring, if set. */
+  pragma?: string;
+  /**
+   * When true, every matching block runs in its own fresh session. Otherwise
+   * all blocks matching this directive share one persistent session.
+   */
+  isolate: boolean;
+  /** 1-based line number of the directive comment in the source document. */
+  line: number;
+}
+
+/** A single command + its expected output, as parsed from a runnable block. */
 export interface Interaction {
   /** The command line to send to the shell (without the leading `$ `). */
   command: string;
@@ -15,12 +35,12 @@ export interface Interaction {
   line: number;
 }
 
-/** A single `console` (or otherwise runnable) fenced code block. */
+/** A single fenced code block found in the document. */
 export interface Block {
-  /** The info string after the opening fence, e.g. `console`. */
+  /** The fence language (first token of the info string), e.g. `console`. */
   lang: string;
-  /** Key/value options parsed from the fence info string, e.g. ```console cwd=/tmp */
-  options: Record<string, string>;
+  /** The fence pragma: the info-string text following the language token. */
+  pragma: string;
   /** The interactions contained in the block, in order. */
   interactions: Interaction[];
   /** 1-based line number of the opening fence. */
@@ -29,13 +49,20 @@ export interface Block {
    * The nearest preceding Markdown heading text, if any — used to name tests.
    */
   heading?: string;
+  /**
+   * The directive that owns this block, if exactly one matches. Blocks with no
+   * matching directive are not interpreted by recital.
+   */
+  directive?: RecitalDirective;
 }
 
 /** A parsed Markdown document. */
 export interface ParsedDocument {
   /** Absolute or relative path the document was read from (or a label). */
   path: string;
-  /** All runnable blocks found in the document. */
+  /** The recital directives declared in the document, in order. */
+  directives: RecitalDirective[];
+  /** Every fenced code block found in the document, in order. */
   blocks: Block[];
 }
 
@@ -66,6 +93,7 @@ export interface InteractionResult {
   /** The command after binding substitution, as actually executed. */
   executed: string;
   ok: boolean;
+  /** The command's exit code (informational; not asserted). */
   exitCode: number;
   /** Combined stdout+stderr, in order. */
   output: string;

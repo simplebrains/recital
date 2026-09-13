@@ -1,10 +1,26 @@
 /**
  * Markdown parsing.
  *
- * We keep dependencies at zero and scan line-by-line for fenced code blocks
- * whose info string names a runnable language (default: `console`). Inside a
- * block, `$ ` introduces a command; `> ` continues the previous command; every
- * other line up to the next command is that command's expected output.
+ * We keep dependencies at zero and scan line-by-line for fenced code blocks.
+ * By default recital interprets *nothing* — a document opts in with one or more
+ * directive comments:
+ *
+ *   <!-- recital cmd=bash -->                    interpret every code block
+ *   <!-- recital syntax=shell cmd=bash -->       ...only blocks fenced ```shell
+ *   <!-- recital pragma="Bob logs in" cmd=bash -->  ...only blocks whose fence
+ *                                                    pragma contains that text
+ *   <!-- recital cmd=bash isolate -->            each matching block gets its
+ *                                                own fresh session
+ *
+ * Directives are file-global: every code block is matched against all of the
+ * directives in the document. All blocks matching a (non-`isolate`) directive
+ * share one persistent session; blocks are always executed in document order,
+ * even when several sessions are interleaved. `cmd=` is required. A block that
+ * matches more than one directive is ambiguous and is a parse error.
+ *
+ * Inside a block, `$ ` introduces a command; `> ` continues the previous
+ * command; every other line up to the next command is that command's expected
+ * output.
  *
  * A block can also stay fully literal — reading like a real terminal session
  * with no `{{…}}` markup — by declaring a value to be *an identity to itself*
@@ -26,14 +42,13 @@
  * Each declaration rewrites its matching literal in later blocks into the
  * equivalent `{{name}}` / `{{name:type}}` token, so the rest of the pipeline is
  * unchanged. Anonymous declarations get an internal, never-rendered synthetic
- * name; they only ever exist as identities.
+ * name; they only ever exist as identities. Unlike directives, identity
+ * declarations are positional: they apply only to blocks that follow them.
  */
 
-import type { Block, Interaction, ParsedDocument } from "./types.js";
+import type { Block, Interaction, ParsedDocument, RecitalDirective } from "./types.js";
 
 export interface ParseOptions {
-  /** Languages treated as runnable CLI sessions. Default: console family. */
-  languages?: string[];
   /** Path/label recorded on the parsed document. */
   path?: string;
 }
@@ -49,61 +64,33 @@ export interface IdentityDeclaration {
   anonymous: boolean;
 }
 
-const DEFAULT_LANGUAGES = ["console", "shell-session", "shellsession", "session"];
 const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/;
 const HEADING_RE = /^#{1,6}\s+(.*?)\s*#*\s*$/;
+// A `<!-- recital … -->` directive comment. The attribute text is captured.
+const DIRECTIVE_RE = /^\s*<!--\s*recital\b(.*?)\s*-->\s*$/;
 // An identity declaration: an HTML comment whose entire content is an optional
 // `name` and/or `:type` prefix followed by a quoted value. The strict shape
 // keeps ordinary HTML comments (`<!-- TODO … -->`) from being mistaken for one.
-const LITERAL_RE =
+const IDENTITY_RE =
   /^\s*<!--\s*(?:([A-Za-z_][A-Za-z0-9_]*)?(?::([A-Za-z]+))?[ \t]+)?(?:"([^"]*)"|'([^']*)')\s*-->\s*$/;
 
-/**
- * Rewrite declared literal placeholders in a piece of text into the equivalent
- * `{{name}}` / `{{name:type}}` token. Longer placeholders are applied first so
- * a placeholder that contains another is not partially replaced.
- */
-function applyLiterals(text: string, declarations: IdentityDeclaration[]): string {
-  let out = text;
-  const ordered = [...declarations].sort((a, b) => b.value.length - a.value.length);
-  for (const decl of ordered) {
-    if (!decl.value) continue;
-    const token = decl.type ? `{{${decl.name}:${decl.type}}}` : `{{${decl.name}}}`;
-    out = out.split(decl.value).join(token);
+function stripQuotes(value: string): string {
+  if (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'")))
+  ) {
+    return value.slice(1, -1);
   }
-  return out;
+  return value;
 }
 
-/** Parse a fence info string into a language and key/value options. */
-function parseInfoString(info: string): { lang: string; options: Record<string, string> } {
-  const options: Record<string, string> = {};
-  const tokens = tokenizeInfo(info.trim());
-  const lang = (tokens.shift() ?? "").toLowerCase();
-  for (const tok of tokens) {
-    const eq = tok.indexOf("=");
-    if (eq === -1) {
-      options[tok] = "true";
-    } else {
-      const key = tok.slice(0, eq);
-      let value = tok.slice(eq + 1);
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      options[key] = value;
-    }
-  }
-  return { lang, options };
-}
-
-/** Split an info string on whitespace while respecting quotes. */
-function tokenizeInfo(info: string): string[] {
+/** Split a string on whitespace while respecting quotes. */
+function tokenize(text: string): string[] {
   const tokens: string[] = [];
   let current = "";
   let quote: string | null = null;
-  for (const ch of info) {
+  for (const ch of text) {
     if (quote) {
       current += ch;
       if (ch === quote) quote = null;
@@ -121,8 +108,103 @@ function tokenizeInfo(info: string): string[] {
   return tokens;
 }
 
+/** Parse the attribute text of a `<!-- recital … -->` directive. */
+function parseDirective(attrs: string, line: number): RecitalDirective {
+  let cmd: string | undefined;
+  let syntax: string | undefined;
+  let pragma: string | undefined;
+  let isolate = false;
+
+  for (const tok of tokenize(attrs.trim())) {
+    const eq = tok.indexOf("=");
+    if (eq === -1) {
+      if (tok === "isolate") {
+        isolate = true;
+      } else {
+        throw new Error(
+          `recital directive on line ${line} has unknown flag "${tok}". ` +
+            `Expected key=value attributes (cmd, syntax, pragma) or the "isolate" flag.`,
+        );
+      }
+      continue;
+    }
+    const key = tok.slice(0, eq);
+    const value = stripQuotes(tok.slice(eq + 1));
+    switch (key) {
+      case "cmd":
+        cmd = value;
+        break;
+      case "syntax":
+        syntax = value.toLowerCase();
+        break;
+      case "pragma":
+        pragma = value;
+        break;
+      default:
+        throw new Error(
+          `recital directive on line ${line} has unknown attribute "${key}". ` +
+            `Known attributes: cmd, syntax, pragma; flag: isolate.`,
+        );
+    }
+  }
+
+  if (!cmd) {
+    throw new Error(`recital directive on line ${line} is missing required cmd= attribute.`);
+  }
+  return { cmd, syntax, pragma, isolate, line };
+}
+
+/** Split a fence info string into its language token and trailing pragma. */
+function parseFenceInfo(info: string): { lang: string; pragma: string } {
+  const trimmed = info.trim();
+  if (!trimmed) return { lang: "", pragma: "" };
+  const m = /^(\S+)\s*([\s\S]*)$/.exec(trimmed);
+  return { lang: m![1]!.toLowerCase(), pragma: m![2]!.trim() };
+}
+
+/** Find the single directive that owns a block, erroring if more than one does. */
+function matchDirective(
+  lang: string,
+  pragma: string,
+  directives: RecitalDirective[],
+  blockLine: number,
+): RecitalDirective | undefined {
+  const matches = directives.filter((d) => {
+    if (d.syntax !== undefined && d.syntax !== lang) return false;
+    if (d.pragma !== undefined && !pragma.includes(d.pragma)) return false;
+    return true;
+  });
+  if (matches.length > 1) {
+    const lines = matches.map((d) => d.line).join(", ");
+    throw new Error(
+      `Code block on line ${blockLine} matches multiple recital directives ` +
+        `(lines ${lines}). Make the directives' syntax/pragma selectors disjoint.`,
+    );
+  }
+  return matches[0];
+}
+
+/**
+ * Rewrite declared identity placeholders in a piece of text into the equivalent
+ * `{{name}}` / `{{name:type}}` token. Longer placeholders are applied first so
+ * a placeholder that contains another is not partially replaced.
+ */
+function applyIdentities(text: string, declarations: IdentityDeclaration[]): string {
+  let out = text;
+  const ordered = [...declarations].sort((a, b) => b.value.length - a.value.length);
+  for (const decl of ordered) {
+    if (!decl.value) continue;
+    const token = decl.type ? `{{${decl.name}:${decl.type}}}` : `{{${decl.name}}}`;
+    out = out.split(decl.value).join(token);
+  }
+  return out;
+}
+
 /** Parse the body lines of a runnable block into ordered interactions. */
-function parseInteractions(lines: { text: string; line: number }[]): Interaction[] {
+function parseInteractions(
+  lines: { text: string; line: number }[],
+  declarations: IdentityDeclaration[],
+): Interaction[] {
   const interactions: Interaction[] = [];
   let current: Interaction | null = null;
 
@@ -142,14 +224,31 @@ function parseInteractions(lines: { text: string; line: number }[]): Interaction
     // Lines before the first prompt are ignored.
   }
   if (current) interactions.push(current);
-  return interactions;
+
+  // Rewrite declared identities into the equivalent binding tokens so the rest
+  // of the pipeline is unchanged.
+  return interactions.map((it) => ({
+    ...it,
+    command: applyIdentities(it.command, declarations),
+    expected: it.expected.map((l) => applyIdentities(l, declarations)),
+  }));
 }
 
-/** Parse a Markdown document into runnable blocks. */
+interface RawBlock {
+  lang: string;
+  pragma: string;
+  body: { text: string; line: number }[];
+  line: number;
+  heading?: string;
+  /** Identity declarations in effect where this block appeared. */
+  declarations: IdentityDeclaration[];
+}
+
+/** Parse a Markdown document into directives and code blocks. */
 export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDocument {
-  const languages = new Set((opts.languages ?? DEFAULT_LANGUAGES).map((l) => l.toLowerCase()));
   const lines = source.split(/\r\n?|\n/);
-  const blocks: Block[] = [];
+  const directives: RecitalDirective[] = [];
+  const rawBlocks: RawBlock[] = [];
 
   let lastHeading: string | undefined;
   const declarations: IdentityDeclaration[] = [];
@@ -161,14 +260,19 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
     const fence = FENCE_RE.exec(raw);
 
     if (!fence) {
-      const literal = LITERAL_RE.exec(raw);
-      if (literal) {
-        const name = literal[1];
-        const value = literal[3] ?? literal[4] ?? "";
+      const directive = DIRECTIVE_RE.exec(raw);
+      if (directive) {
+        directives.push(parseDirective(directive[1] ?? "", i + 1));
+        i++;
+        continue;
+      }
+      const identity = IDENTITY_RE.exec(raw);
+      if (identity) {
+        const name = identity[1];
         declarations.push({
           name: name ?? `__recital_anon_${anonCount++}`,
-          type: literal[2],
-          value,
+          type: identity[2],
+          value: identity[3] ?? identity[4] ?? "",
           anonymous: name === undefined,
         });
         i++;
@@ -181,7 +285,7 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
     }
 
     const [, indent, marker, info] = fence;
-    const { lang, options } = parseInfoString(info!);
+    const { lang, pragma } = parseFenceInfo(info!);
     const openLine = i + 1; // 1-based
     const closeRe = new RegExp(`^\\s*${marker![0]}{${marker!.length},}\\s*$`);
 
@@ -197,18 +301,26 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
     }
     i++; // consume closing fence
 
-    if (languages.has(lang)) {
-      // Rewrite any declared literals into the equivalent binding tokens so the
-      // rest of the pipeline is unchanged. Declarations seen before this block
-      // apply; the placeholder captures on first sight and back-references after.
-      const interactions = parseInteractions(body).map((it) => ({
-        ...it,
-        command: applyLiterals(it.command, declarations),
-        expected: it.expected.map((l) => applyLiterals(l, declarations)),
-      }));
-      blocks.push({ lang, options, interactions, line: openLine, heading: lastHeading });
-    }
+    rawBlocks.push({
+      lang,
+      pragma,
+      body,
+      line: openLine,
+      heading: lastHeading,
+      declarations: [...declarations],
+    });
   }
 
-  return { path: opts.path ?? "<inline>", blocks };
+  // Directives are file-global, so resolve each block against all of them now
+  // that the whole document has been scanned.
+  const blocks: Block[] = rawBlocks.map((rb) => ({
+    lang: rb.lang,
+    pragma: rb.pragma,
+    interactions: parseInteractions(rb.body, rb.declarations),
+    line: rb.line,
+    heading: rb.heading,
+    directive: matchDirective(rb.lang, rb.pragma, directives, rb.line),
+  }));
+
+  return { path: opts.path ?? "<inline>", directives, blocks };
 }

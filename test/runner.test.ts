@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseMarkdown } from "../src/parser.js";
-import { Runner, runDocument } from "../src/runner.js";
+import { runDocument } from "../src/runner.js";
 import { ShellSession } from "../src/shell.js";
 
 describe("ShellSession", () => {
@@ -45,24 +44,48 @@ describe("ShellSession", () => {
 describe("runDocument", () => {
   it("passes a matching session", async () => {
     const result = await runDocument(
-      ["```console", "$ echo hello", "hello", "```"].join("\n"),
+      ["<!-- recital cmd=bash -->", "```console", "$ echo hello", "hello", "```"].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("does not run blocks without a matching directive", async () => {
+    const result = await runDocument(
+      [
+        "<!-- recital syntax=console cmd=bash -->",
+        "```console",
+        "$ echo hi",
+        "hi",
+        "```",
+        "```js",
+        "definitely not a command",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.blocks).toHaveLength(1);
+  });
+
+  it("asserts output, not exit status", async () => {
+    // `false` exits non-zero but produces no output; recital only checks output.
+    const result = await runDocument(
+      ["<!-- recital cmd=bash -->", "```console", "$ false", "```"].join("\n"),
     );
     expect(result.ok).toBe(true);
   });
 
   it("fails on a mismatch and explains it", async () => {
     const result = await runDocument(
-      ["```console", "$ echo hello", "goodbye", "```"].join("\n"),
+      ["<!-- recital cmd=bash -->", "```console", "$ echo hello", "goodbye", "```"].join("\n"),
     );
     expect(result.ok).toBe(false);
-    const failed = result.blocks[0]!.interactions[0]!;
-    expect(failed.ok).toBe(false);
-    expect(failed.error).toContain("did not match");
+    expect(result.blocks[0]!.interactions[0]!.error).toContain("did not match");
   });
 
   it("captures a value and reuses it in a later command and expectation", async () => {
     const result = await runDocument(
       [
+        "<!-- recital cmd=bash -->",
         "```console",
         "$ echo token-12345",
         "token-{{id:int}}",
@@ -74,24 +97,10 @@ describe("runDocument", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("asserts exit codes when expectSuccess is set", async () => {
-    const result = await runDocument(["```console", "$ false", "```"].join("\n"), {
-      expectSuccess: true,
-    });
-    expect(result.ok).toBe(false);
-    expect(result.blocks[0]!.interactions[0]!.error).toContain("exit code 0");
-  });
-
-  it("honours a block-level exit= override", async () => {
-    const result = await runDocument(["```console exit=1", "$ false", "```"].join("\n"), {
-      expectSuccess: true,
-    });
-    expect(result.ok).toBe(true);
-  });
-
   it("captures and reuses a value declared via a named identity comment", async () => {
     const result = await runDocument(
       [
+        "<!-- recital cmd=bash -->",
         '<!-- n "12345" -->',
         "```console",
         "$ echo $RANDOM",
@@ -107,6 +116,7 @@ describe("runDocument", () => {
   it("captures and reuses a value declared via an anonymous identity comment", async () => {
     const result = await runDocument(
       [
+        "<!-- recital cmd=bash -->",
         '<!-- "12345" -->',
         "```console",
         "$ echo $RANDOM",
@@ -119,15 +129,58 @@ describe("runDocument", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("skips blocks marked skip", async () => {
-    const parsed = parseMarkdown(["```console skip", "$ definitely-not-a-command", "```"].join("\n"));
-    const runner = new Runner();
-    try {
-      const block = await runner.runBlock(parsed.blocks[0]!);
-      expect(block.ok).toBe(true);
-      expect(block.interactions).toHaveLength(0);
-    } finally {
-      await runner.close();
-    }
+  it("keeps per-session state across interleaved sessions, in document order", async () => {
+    const result = await runDocument(
+      [
+        '<!-- recital syntax=console cmd=bash pragma="A" -->',
+        '<!-- recital syntax=console cmd=bash pragma="B" -->',
+        "```console A",
+        "$ X=1",
+        "```",
+        "```console B",
+        "$ X=99",
+        '$ echo "$X"',
+        "99",
+        "```",
+        "```console A",
+        '$ echo "$X"',
+        "1",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.blocks).toHaveLength(3);
+  });
+
+  it("isolate gives each block a fresh session", async () => {
+    const result = await runDocument(
+      [
+        "<!-- recital syntax=console cmd=bash isolate -->",
+        "```console",
+        "$ X=1",
+        '$ echo "$X"',
+        "1",
+        "```",
+        "```console",
+        '$ echo "${X:-unset}"',
+        "unset",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("propagates a parse error for an ambiguous block", async () => {
+    await expect(
+      runDocument(
+        [
+          "<!-- recital cmd=bash -->",
+          "<!-- recital syntax=console cmd=bash -->",
+          "```console",
+          "$ true",
+          "```",
+        ].join("\n"),
+      ),
+    ).rejects.toThrow(/multiple recital directives/);
   });
 });

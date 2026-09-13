@@ -34,5 +34,6 @@ export type {
   InteractionResult,
   LineMatch,
   ParsedDocument,
+  RecitalDirective,
   TokenType,
 } from "./types.js";
