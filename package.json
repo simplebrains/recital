@@ -2,6 +2,9 @@
   "name": "@simplebrains/recital",
   "version": "0.1.0",
   "description": "Run Markdown files that describe CLI sessions — as documentation, and as executable/verifiable tests.",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "cli",
     "markdown",
