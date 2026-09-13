@@ -18,7 +18,7 @@ document in.
 ## Install
 
 ```bash
-npm install --save-dev recital
+npm install --save-dev @usergenic/recital
 ```
 
 ## Opting in with a directive
