@@ -3,8 +3,8 @@
  */
 
 /**
- * A `<!-- recital … -->` directive: a session configuration declared in the
- * document. It selects which fenced code blocks recital interprets, and how.
+ * A `<!-- recital … -->` session directive: configures a session and selects
+ * which fenced code blocks it owns.
  */
 export interface RecitalDirective {
   /** The command used to drive the session (e.g. `bash`). Required. */
@@ -18,6 +18,18 @@ export interface RecitalDirective {
    * all blocks matching this directive share one persistent session.
    */
   isolate: boolean;
+  /**
+   * Session working directory. `"temp"` means a host-managed temporary
+   * directory created for the session and removed when it ends; any other
+   * string is used as a path.
+   */
+  cwd?: string;
+  /** Extra environment variables injected into the session. */
+  env?: Record<string, string>;
+  /** Shell snippet run once when the session starts. */
+  setup?: string;
+  /** Shell snippet always run when the session ends (before the shell exits). */
+  teardown?: string;
   /** 1-based line number of the directive comment in the source document. */
   line: number;
 }
@@ -35,7 +47,7 @@ export interface Interaction {
   line: number;
 }
 
-/** A single fenced code block found in the document. */
+/** A single fenced code block found in the Markdown document. */
 export interface Block {
   /** The fence language (first token of the info string), e.g. `console`. */
   lang: string;
@@ -60,7 +72,7 @@ export interface Block {
 export interface ParsedDocument {
   /** Absolute or relative path the document was read from (or a label). */
   path: string;
-  /** The recital directives declared in the document, in order. */
+  /** The recital session directives declared in the document, in order. */
   directives: RecitalDirective[];
   /** Every fenced code block found in the document, in order. */
   blocks: Block[];

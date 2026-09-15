@@ -1,50 +1,23 @@
 /**
  * Markdown parsing.
  *
- * We keep dependencies at zero and scan line-by-line for fenced code blocks.
- * By default recital interprets *nothing* — a document opts in with one or more
- * directive comments:
+ * By default recital interprets *nothing*. A document opts in with one or more
+ * `<!-- recital … -->` comments whose body is YAML:
  *
- *   <!-- recital cmd=bash -->                    interpret every code block
- *   <!-- recital syntax=shell cmd=bash -->       ...only blocks fenced ```shell
- *   <!-- recital pragma="Bob logs in" cmd=bash -->  ...only blocks whose fence
- *                                                    pragma contains that text
- *   <!-- recital cmd=bash isolate -->            each matching block gets its
- *                                                own fresh session
+ *   <!-- recital cmd: bash -->
+ *   <!-- recital: { cmd: bash, syntax: console } -->
+ *   <!-- recital bind: "/tmp/x" -->
  *
- * Directives are file-global: every code block is matched against all of the
- * directives in the document. All blocks matching a (non-`isolate`) directive
- * share one persistent session; blocks are always executed in document order,
- * even when several sessions are interleaved. `cmd=` is required. A block that
- * matches more than one directive is ambiguous and is a parse error.
+ * Prefix sugar `<!-- recital <key>: <yaml> -->` desugars to `{ <key>: <yaml> }`.
+ * A mapping with `cmd` is a file-global session directive; a mapping with only
+ * `bind` is a positional literal-identity declaration.
  *
  * Inside a block, `$ ` introduces a command; `> ` continues the previous
  * command; every other line up to the next command is that command's expected
  * output.
- *
- * A block can also stay fully literal — reading like a real terminal session
- * with no `{{…}}` markup — by declaring a value to be *an identity to itself*
- * in an HTML comment *outside* the fence, which is invisible in rendered
- * Markdown. The signal is just a real-looking value in quotes:
- *
- *   <!-- "/var/folders/.../tmp.abc123" -->
- *
- * That says: wherever the exact string `/var/folders/.../tmp.abc123` appears in
- * the following session, treat every occurrence as the same value — capture it
- * on first sight and require it to recur (and substitute it into commands)
- * everywhere after. The point is identity, so no name is required. An optional
- * name and/or type may still be given:
- *
- *   <!-- workdir "…" -->        name it `workdir`
- *   <!-- workdir:path "…" -->   name it and constrain the capture to `path`
- *   <!-- :path "…" -->          anonymous, but constrain the capture to `path`
- *
- * Each declaration rewrites its matching literal in later blocks into the
- * equivalent `{{name}}` / `{{name:type}}` token, so the rest of the pipeline is
- * unchanged. Anonymous declarations get an internal, never-rendered synthetic
- * name; they only ever exist as identities. Unlike directives, identity
- * declarations are positional: they apply only to blocks that follow them.
  */
+
+import { parse as parseYaml } from "yaml";
 
 import type { Block, Interaction, ParsedDocument, RecitalDirective } from "./types.js";
 
@@ -53,105 +26,74 @@ export interface ParseOptions {
   path?: string;
 }
 
-/** A `<!-- [name][:type] "value" -->` identity declaration. */
+/** A `bind` identity declaration. */
 export interface IdentityDeclaration {
   /** The binding name — synthesized internally for anonymous declarations. */
   name: string;
   type?: string;
   /** The literal placeholder string that stands in for the binding. */
-  value: string;
+  text: string;
   /** Whether the name was synthesized (the declaration gave no name). */
   anonymous: boolean;
 }
 
 const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/;
 const HEADING_RE = /^#{1,6}\s+(.*?)\s*#*\s*$/;
-// A `<!-- recital … -->` directive comment. The attribute text is captured.
-const DIRECTIVE_RE = /^\s*<!--\s*recital\b(.*?)\s*-->\s*$/;
-// An identity declaration: an HTML comment whose entire content is an optional
-// `name` and/or `:type` prefix followed by a quoted value. The strict shape
-// keeps ordinary HTML comments (`<!-- TODO … -->`) from being mistaken for one.
-const IDENTITY_RE =
-  /^\s*<!--\s*(?:([A-Za-z_][A-Za-z0-9_]*)?(?::([A-Za-z]+))?[ \t]+)?(?:"([^"]*)"|'([^']*)')\s*-->\s*$/;
+/** Opening of a recital HTML comment: `<!-- recital:` or `<!-- recital key:`. */
+const RECITAL_OPEN_RE = /^\s*<!--\s*recital(?:\s+([A-Za-z_][A-Za-z0-9_]*))?:(.*)$/;
 
-function stripQuotes(value: string): string {
-  if (
-    value.length >= 2 &&
-    ((value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'")))
-  ) {
-    return value.slice(1, -1);
+const SESSION_KEYS = new Set([
+  "cmd",
+  "syntax",
+  "pragma",
+  "isolate",
+  "cwd",
+  "env",
+  "setup",
+  "teardown",
+  "bind",
+]);
+
+/** Rewrite declared identity placeholders into `{{name}}` / `{{name:type}}`. */
+function applyIdentities(text: string, declarations: IdentityDeclaration[]): string {
+  let out = text;
+  const ordered = [...declarations].sort((a, b) => b.text.length - a.text.length);
+  for (const decl of ordered) {
+    if (!decl.text) continue;
+    const token = decl.type ? `{{${decl.name}:${decl.type}}}` : `{{${decl.name}}}`;
+    out = out.split(decl.text).join(token);
   }
-  return value;
+  return out;
 }
 
-/** Split a string on whitespace while respecting quotes. */
-function tokenize(text: string): string[] {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: string | null = null;
-  for (const ch of text) {
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-    } else if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-    } else if (/\s/.test(ch)) {
-      if (current) tokens.push(current);
-      current = "";
-    } else {
-      current += ch;
+/** Parse the body lines of a runnable block into ordered interactions. */
+function parseInteractions(
+  lines: { text: string; line: number }[],
+  declarations: IdentityDeclaration[],
+): Interaction[] {
+  const interactions: Interaction[] = [];
+  let current: Interaction | null = null;
+
+  for (const { text, line } of lines) {
+    const promptMatch = /^\$\s?(.*)$/.exec(text);
+    const contMatch = /^>\s?(.*)$/.exec(text);
+
+    if (promptMatch) {
+      if (current) interactions.push(current);
+      current = { command: promptMatch[1]!, expected: [], line };
+    } else if (contMatch && current && current.expected.length === 0) {
+      current.command += "\n" + contMatch[1]!;
+    } else if (current) {
+      current.expected.push(text);
     }
   }
-  if (current) tokens.push(current);
-  return tokens;
-}
+  if (current) interactions.push(current);
 
-/** Parse the attribute text of a `<!-- recital … -->` directive. */
-function parseDirective(attrs: string, line: number): RecitalDirective {
-  let cmd: string | undefined;
-  let syntax: string | undefined;
-  let pragma: string | undefined;
-  let isolate = false;
-
-  for (const tok of tokenize(attrs.trim())) {
-    const eq = tok.indexOf("=");
-    if (eq === -1) {
-      if (tok === "isolate") {
-        isolate = true;
-      } else {
-        throw new Error(
-          `recital directive on line ${line} has unknown flag "${tok}". ` +
-            `Expected key=value attributes (cmd, syntax, pragma) or the "isolate" flag.`,
-        );
-      }
-      continue;
-    }
-    const key = tok.slice(0, eq);
-    const value = stripQuotes(tok.slice(eq + 1));
-    switch (key) {
-      case "cmd":
-        cmd = value;
-        break;
-      case "syntax":
-        syntax = value.toLowerCase();
-        break;
-      case "pragma":
-        pragma = value;
-        break;
-      default:
-        throw new Error(
-          `recital directive on line ${line} has unknown attribute "${key}". ` +
-            `Known attributes: cmd, syntax, pragma; flag: isolate.`,
-        );
-    }
-  }
-
-  if (!cmd) {
-    throw new Error(`recital directive on line ${line} is missing required cmd= attribute.`);
-  }
-  return { cmd, syntax, pragma, isolate, line };
+  return interactions.map((it) => ({
+    ...it,
+    command: applyIdentities(it.command, declarations),
+    expected: it.expected.map((l) => applyIdentities(l, declarations)),
+  }));
 }
 
 /** Split a fence info string into its language token and trailing pragma. */
@@ -184,54 +126,290 @@ function matchDirective(
   return matches[0];
 }
 
-/**
- * Rewrite declared identity placeholders in a piece of text into the equivalent
- * `{{name}}` / `{{name:type}}` token. Longer placeholders are applied first so
- * a placeholder that contains another is not partially replaced.
- */
-function applyIdentities(text: string, declarations: IdentityDeclaration[]): string {
-  let out = text;
-  const ordered = [...declarations].sort((a, b) => b.value.length - a.value.length);
-  for (const decl of ordered) {
-    if (!decl.value) continue;
-    const token = decl.type ? `{{${decl.name}:${decl.type}}}` : `{{${decl.name}}}`;
-    out = out.split(decl.value).join(token);
-  }
-  return out;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Parse the body lines of a runnable block into ordered interactions. */
-function parseInteractions(
-  lines: { text: string; line: number }[],
-  declarations: IdentityDeclaration[],
-): Interaction[] {
-  const interactions: Interaction[] = [];
-  let current: Interaction | null = null;
-
-  for (const { text, line } of lines) {
-    const promptMatch = /^\$\s?(.*)$/.exec(text);
-    const contMatch = /^>\s?(.*)$/.exec(text);
-
-    if (promptMatch) {
-      if (current) interactions.push(current);
-      current = { command: promptMatch[1]!, expected: [], line };
-    } else if (contMatch && current && current.expected.length === 0) {
-      // Secondary-prompt continuation of the command (before any output).
-      current.command += "\n" + contMatch[1]!;
-    } else if (current) {
-      current.expected.push(text);
-    }
-    // Lines before the first prompt are ignored.
+function parseBindEntry(
+  entry: unknown,
+  line: number,
+  nextAnon: () => string,
+): IdentityDeclaration {
+  if (typeof entry === "string") {
+    return { name: nextAnon(), text: entry, anonymous: true };
   }
-  if (current) interactions.push(current);
+  if (!isPlainObject(entry)) {
+    throw new Error(
+      `recital bind entry on line ${line} must be a string or mapping, got ${typeof entry}.`,
+    );
+  }
 
-  // Rewrite declared identities into the equivalent binding tokens so the rest
-  // of the pipeline is unchanged.
-  return interactions.map((it) => ({
-    ...it,
-    command: applyIdentities(it.command, declarations),
-    expected: it.expected.map((l) => applyIdentities(l, declarations)),
-  }));
+  // Explicit: { name?, type?, text }
+  if ("text" in entry) {
+    const text = entry.text;
+    if (typeof text !== "string") {
+      throw new Error(`recital bind entry on line ${line} has non-string text.`);
+    }
+    const name = entry.name;
+    if (name !== undefined && typeof name !== "string") {
+      throw new Error(`recital bind entry on line ${line} has non-string name.`);
+    }
+    const type = entry.type;
+    if (type !== undefined && typeof type !== "string") {
+      throw new Error(`recital bind entry on line ${line} has non-string type.`);
+    }
+    const unknown = Object.keys(entry).filter((k) => !["name", "type", "text"].includes(k));
+    if (unknown.length) {
+      throw new Error(
+        `recital bind entry on line ${line} has unknown field(s): ${unknown.join(", ")}.`,
+      );
+    }
+    return {
+      name: name ?? nextAnon(),
+      type,
+      text,
+      anonymous: name === undefined,
+    };
+  }
+
+  // Single-key sugar: name: "…"  or  name: { type, text }
+  const keys = Object.keys(entry);
+  if (keys.length !== 1) {
+    throw new Error(
+      `recital bind entry on line ${line} must be a string, { text, … }, or a single-key name mapping.`,
+    );
+  }
+  const name = keys[0]!;
+  const value = entry[name];
+  if (typeof value === "string") {
+    return { name, text: value, anonymous: false };
+  }
+  if (isPlainObject(value) && typeof value.text === "string") {
+    if (value.type !== undefined && typeof value.type !== "string") {
+      throw new Error(`recital bind entry "${name}" on line ${line} has non-string type.`);
+    }
+    const unknown = Object.keys(value).filter((k) => !["type", "text"].includes(k));
+    if (unknown.length) {
+      throw new Error(
+        `recital bind entry "${name}" on line ${line} has unknown field(s): ${unknown.join(", ")}.`,
+      );
+    }
+    return {
+      name,
+      type: value.type as string | undefined,
+      text: value.text,
+      anonymous: false,
+    };
+  }
+  throw new Error(
+    `recital bind entry "${name}" on line ${line} must be a string or { type?, text }.`,
+  );
+}
+
+function parseBind(
+  value: unknown,
+  line: number,
+  nextAnon: () => string,
+): IdentityDeclaration[] {
+  if (typeof value === "string") {
+    return [parseBindEntry(value, line, nextAnon)];
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => parseBindEntry(entry, line, nextAnon));
+  }
+  // Named shorthand: { workdir: "/tmp/x", answer: { type: int, text: "42" } }
+  if (isPlainObject(value)) {
+    return Object.entries(value).map(([name, v]) =>
+      parseBindEntry({ [name]: v }, line, nextAnon),
+    );
+  }
+  throw new Error(
+    `recital bind on line ${line} must be a string, a sequence, or a name mapping.`,
+  );
+}
+
+function parseEnv(value: unknown, line: number): Record<string, string> {
+  if (!isPlainObject(value)) {
+    throw new Error(`recital env on line ${line} must be a mapping of string values.`);
+  }
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+      throw new Error(`recital env.${k} on line ${line} must be a scalar string.`);
+    }
+    env[k] = String(v);
+  }
+  return env;
+}
+
+function parseSessionMapping(
+  map: Record<string, unknown>,
+  line: number,
+  nextAnon: () => string,
+): { directive: RecitalDirective; identities: IdentityDeclaration[] } {
+  const unknown = Object.keys(map).filter((k) => !SESSION_KEYS.has(k));
+  if (unknown.length) {
+    throw new Error(
+      `recital directive on line ${line} has unknown field(s): ${unknown.join(", ")}. ` +
+        `Known fields: ${[...SESSION_KEYS].join(", ")}.`,
+    );
+  }
+
+  const cmd = map.cmd;
+  if (typeof cmd !== "string" || !cmd) {
+    throw new Error(`recital directive on line ${line} is missing required field cmd.`);
+  }
+
+  let syntax: string | undefined;
+  if (map.syntax !== undefined) {
+    if (typeof map.syntax !== "string") {
+      throw new Error(`recital syntax on line ${line} must be a string.`);
+    }
+    syntax = map.syntax.toLowerCase();
+  }
+
+  let pragma: string | undefined;
+  if (map.pragma !== undefined) {
+    if (typeof map.pragma !== "string") {
+      throw new Error(`recital pragma on line ${line} must be a string.`);
+    }
+    pragma = map.pragma;
+  }
+
+  let isolate = false;
+  if (map.isolate !== undefined) {
+    if (typeof map.isolate !== "boolean") {
+      throw new Error(`recital isolate on line ${line} must be a boolean.`);
+    }
+    isolate = map.isolate;
+  }
+
+  let cwd: string | undefined;
+  if (map.cwd !== undefined) {
+    if (typeof map.cwd !== "string" || !map.cwd) {
+      throw new Error(`recital cwd on line ${line} must be a non-empty string (or "temp").`);
+    }
+    cwd = map.cwd;
+  }
+
+  const env = map.env !== undefined ? parseEnv(map.env, line) : undefined;
+
+  let setup: string | undefined;
+  if (map.setup !== undefined) {
+    if (typeof map.setup !== "string") {
+      throw new Error(`recital setup on line ${line} must be a string.`);
+    }
+    setup = map.setup;
+  }
+
+  let teardown: string | undefined;
+  if (map.teardown !== undefined) {
+    if (typeof map.teardown !== "string") {
+      throw new Error(`recital teardown on line ${line} must be a string.`);
+    }
+    teardown = map.teardown;
+  }
+
+  const identities =
+    map.bind !== undefined ? parseBind(map.bind, line, nextAnon) : [];
+
+  return {
+    directive: { cmd, syntax, pragma, isolate, cwd, env, setup, teardown, line },
+    identities,
+  };
+}
+
+/**
+ * Read a recital HTML comment starting at `startIdx`. Returns the desugared
+ * YAML mapping plus the index of the line containing `-->`.
+ */
+function readRecitalComment(
+  lines: string[],
+  startIdx: number,
+): { map: Record<string, unknown>; endIdx: number; line: number } {
+  const open = RECITAL_OPEN_RE.exec(lines[startIdx]!);
+  if (!open) {
+    throw new Error(`internal: expected recital comment on line ${startIdx + 1}`);
+  }
+  const prefixKey = open[1];
+  let buf = open[2] ?? "";
+  let i = startIdx;
+
+  while (true) {
+    const close = buf.indexOf("-->");
+    if (close !== -1) {
+      const yamlText = buf.slice(0, close);
+      let value: unknown;
+      try {
+        value = parseYaml(yamlText);
+      } catch (err) {
+        throw new Error(
+          `recital comment on line ${startIdx + 1} has invalid YAML: ${(err as Error).message}`,
+        );
+      }
+
+      let map: Record<string, unknown>;
+      if (prefixKey) {
+        map = { [prefixKey]: value };
+      } else if (isPlainObject(value)) {
+        map = value;
+      } else {
+        throw new Error(
+          `recital comment on line ${startIdx + 1} must be a YAML mapping ` +
+            `(or use a key prefix such as "bind:" or "cmd:").`,
+        );
+      }
+      return { map, endIdx: i, line: startIdx + 1 };
+    }
+    i++;
+    if (i >= lines.length) {
+      throw new Error(`Unclosed recital comment starting on line ${startIdx + 1}.`);
+    }
+    buf += "\n" + lines[i];
+  }
+}
+
+function classifyComment(
+  map: Record<string, unknown>,
+  line: number,
+  nextAnon: () => string,
+):
+  | { kind: "session"; directive: RecitalDirective; identities: IdentityDeclaration[] }
+  | { kind: "bind"; identities: IdentityDeclaration[] } {
+  const keys = Object.keys(map);
+  if (keys.length === 0) {
+    throw new Error(`recital comment on line ${line} is empty.`);
+  }
+
+  const unknown = keys.filter((k) => !SESSION_KEYS.has(k));
+  if (unknown.length) {
+    throw new Error(
+      `recital comment on line ${line} has unknown field(s): ${unknown.join(", ")}. ` +
+        `Known fields: ${[...SESSION_KEYS].join(", ")}.`,
+    );
+  }
+
+  if ("cmd" in map) {
+    const { directive, identities } = parseSessionMapping(map, line, nextAnon);
+    return { kind: "session", directive, identities };
+  }
+
+  // Prefix sugar does not merge across comments: session keys without cmd fail.
+  const sessionOnly = keys.filter((k) => k !== "bind");
+  if (sessionOnly.length) {
+    throw new Error(
+      `recital comment on line ${line} has session field(s) ${sessionOnly.join(", ")} ` +
+        `but no cmd. Use a full mapping that includes cmd, or a "cmd:" prefix comment.`,
+    );
+  }
+
+  if (!("bind" in map)) {
+    throw new Error(
+      `recital comment on line ${line} must declare cmd (session) or bind (identities).`,
+    );
+  }
+
+  return { kind: "bind", identities: parseBind(map.bind, line, nextAnon) };
 }
 
 interface RawBlock {
@@ -240,7 +418,6 @@ interface RawBlock {
   body: { text: string; line: number }[];
   line: number;
   heading?: string;
-  /** Identity declarations in effect where this block appeared. */
   declarations: IdentityDeclaration[];
 }
 
@@ -253,6 +430,7 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
   let lastHeading: string | undefined;
   const declarations: IdentityDeclaration[] = [];
   let anonCount = 0;
+  const nextAnon = () => `__recital_anon_${anonCount++}`;
   let i = 0;
 
   while (i < lines.length) {
@@ -260,22 +438,16 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
     const fence = FENCE_RE.exec(raw);
 
     if (!fence) {
-      const directive = DIRECTIVE_RE.exec(raw);
-      if (directive) {
-        directives.push(parseDirective(directive[1] ?? "", i + 1));
-        i++;
-        continue;
-      }
-      const identity = IDENTITY_RE.exec(raw);
-      if (identity) {
-        const name = identity[1];
-        declarations.push({
-          name: name ?? `__recital_anon_${anonCount++}`,
-          type: identity[2],
-          value: identity[3] ?? identity[4] ?? "",
-          anonymous: name === undefined,
-        });
-        i++;
+      if (RECITAL_OPEN_RE.test(raw)) {
+        const { map, endIdx, line } = readRecitalComment(lines, i);
+        const classified = classifyComment(map, line, nextAnon);
+        if (classified.kind === "session") {
+          declarations.push(...classified.identities);
+          directives.push(classified.directive);
+        } else {
+          declarations.push(...classified.identities);
+        }
+        i = endIdx + 1;
         continue;
       }
       const heading = HEADING_RE.exec(raw);
@@ -286,14 +458,12 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
 
     const [, indent, marker, info] = fence;
     const { lang, pragma } = parseFenceInfo(info!);
-    const openLine = i + 1; // 1-based
+    const openLine = i + 1;
     const closeRe = new RegExp(`^\\s*${marker![0]}{${marker!.length},}\\s*$`);
 
-    // Collect the block body until the matching closing fence.
     const body: { text: string; line: number }[] = [];
     i++;
     while (i < lines.length && !closeRe.test(lines[i]!)) {
-      // Strip the opening fence's indentation, if present.
       let text = lines[i]!;
       if (indent && text.startsWith(indent)) text = text.slice(indent.length);
       body.push({ text, line: i + 1 });
@@ -311,8 +481,6 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
     });
   }
 
-  // Directives are file-global, so resolve each block against all of them now
-  // that the whole document has been scanned.
   const blocks: Block[] = rawBlocks.map((rb) => ({
     lang: rb.lang,
     pragma: rb.pragma,

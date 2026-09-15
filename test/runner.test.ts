@@ -1,3 +1,7 @@
+import { access, mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { runDocument } from "../src/runner.js";
@@ -44,7 +48,7 @@ describe("ShellSession", () => {
 describe("runDocument", () => {
   it("passes a matching session", async () => {
     const result = await runDocument(
-      ["<!-- recital cmd=bash -->", "```console", "$ echo hello", "hello", "```"].join("\n"),
+      ["<!-- recital cmd: bash -->", "```console", "$ echo hello", "hello", "```"].join("\n"),
     );
     expect(result.ok).toBe(true);
   });
@@ -52,7 +56,7 @@ describe("runDocument", () => {
   it("does not run blocks without a matching directive", async () => {
     const result = await runDocument(
       [
-        "<!-- recital syntax=console cmd=bash -->",
+        "<!-- recital: { cmd: bash, syntax: console } -->",
         "```console",
         "$ echo hi",
         "hi",
@@ -67,16 +71,15 @@ describe("runDocument", () => {
   });
 
   it("asserts output, not exit status", async () => {
-    // `false` exits non-zero but produces no output; recital only checks output.
     const result = await runDocument(
-      ["<!-- recital cmd=bash -->", "```console", "$ false", "```"].join("\n"),
+      ["<!-- recital cmd: bash -->", "```console", "$ false", "```"].join("\n"),
     );
     expect(result.ok).toBe(true);
   });
 
   it("fails on a mismatch and explains it", async () => {
     const result = await runDocument(
-      ["<!-- recital cmd=bash -->", "```console", "$ echo hello", "goodbye", "```"].join("\n"),
+      ["<!-- recital cmd: bash -->", "```console", "$ echo hello", "goodbye", "```"].join("\n"),
     );
     expect(result.ok).toBe(false);
     expect(result.blocks[0]!.interactions[0]!.error).toContain("did not match");
@@ -85,7 +88,7 @@ describe("runDocument", () => {
   it("captures a value and reuses it in a later command and expectation", async () => {
     const result = await runDocument(
       [
-        "<!-- recital cmd=bash -->",
+        "<!-- recital cmd: bash -->",
         "```console",
         "$ echo token-12345",
         "token-{{id:int}}",
@@ -97,11 +100,11 @@ describe("runDocument", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("captures and reuses a value declared via a named identity comment", async () => {
+  it("captures and reuses a value declared via a named bind", async () => {
     const result = await runDocument(
       [
-        "<!-- recital cmd=bash -->",
-        '<!-- n "12345" -->',
+        "<!-- recital cmd: bash -->",
+        '<!-- recital bind: n: "12345" -->',
         "```console",
         "$ echo $RANDOM",
         "12345",
@@ -113,11 +116,11 @@ describe("runDocument", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("captures and reuses a value declared via an anonymous identity comment", async () => {
+  it("captures and reuses a value declared via an anonymous bind", async () => {
     const result = await runDocument(
       [
-        "<!-- recital cmd=bash -->",
-        '<!-- "12345" -->',
+        "<!-- recital cmd: bash -->",
+        '<!-- recital bind: "12345" -->',
         "```console",
         "$ echo $RANDOM",
         "12345",
@@ -132,8 +135,8 @@ describe("runDocument", () => {
   it("keeps per-session state across interleaved sessions, in document order", async () => {
     const result = await runDocument(
       [
-        '<!-- recital syntax=console cmd=bash pragma="A" -->',
-        '<!-- recital syntax=console cmd=bash pragma="B" -->',
+        '<!-- recital: { cmd: bash, syntax: console, pragma: "A" } -->',
+        '<!-- recital: { cmd: bash, syntax: console, pragma: "B" } -->',
         "```console A",
         "$ X=1",
         "```",
@@ -155,7 +158,7 @@ describe("runDocument", () => {
   it("isolate gives each block a fresh session", async () => {
     const result = await runDocument(
       [
-        "<!-- recital syntax=console cmd=bash isolate -->",
+        "<!-- recital: { cmd: bash, syntax: console, isolate: true } -->",
         "```console",
         "$ X=1",
         '$ echo "$X"',
@@ -170,12 +173,94 @@ describe("runDocument", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("cwd: temp starts in a host-managed directory that is removed afterward", async () => {
+    const marker = join(await mkdtemp(join(tmpdir(), "recital-marker-")), "seen");
+    const result = await runDocument(
+      [
+        "<!-- recital:",
+        "cmd: bash",
+        "cwd: temp",
+        "setup: |",
+        `  printf '%s' "$PWD" > ${marker}`,
+        "-->",
+        "```console",
+        "$ test -f note.txt || touch note.txt",
+        "$ ls",
+        "note.txt",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+    const dir = await readFile(marker, "utf8");
+    await expect(access(dir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("injects env and runs teardown", async () => {
+    const flag = join(await mkdtemp(join(tmpdir(), "recital-td-")), "torn-down");
+    const result = await runDocument(
+      [
+        "<!-- recital:",
+        "cmd: bash",
+        "env:",
+        "  RECITAL_GREETING: howdy",
+        "teardown: |",
+        `  touch ${flag}`,
+        "-->",
+        "```console",
+        "$ echo \"$RECITAL_GREETING\"",
+        "howdy",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+    await expect(access(flag)).resolves.toBeUndefined();
+  });
+
+  it("runs teardown after a failed assertion", async () => {
+    const flag = join(await mkdtemp(join(tmpdir(), "recital-td-fail-")), "torn-down");
+    const result = await runDocument(
+      [
+        "<!-- recital:",
+        "cmd: bash",
+        "teardown: |",
+        `  touch ${flag}`,
+        "-->",
+        "```console",
+        "$ echo hello",
+        "goodbye",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(false);
+    await expect(access(flag)).resolves.toBeUndefined();
+  });
+
+  it("runs teardown after a failed isolate block", async () => {
+    const flag = join(await mkdtemp(join(tmpdir(), "recital-td-iso-")), "torn-down");
+    const result = await runDocument(
+      [
+        "<!-- recital:",
+        "cmd: bash",
+        "isolate: true",
+        "teardown: |",
+        `  touch ${flag}`,
+        "-->",
+        "```console",
+        "$ echo hello",
+        "goodbye",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(false);
+    await expect(access(flag)).resolves.toBeUndefined();
+  });
+
   it("propagates a parse error for an ambiguous block", async () => {
     await expect(
       runDocument(
         [
-          "<!-- recital cmd=bash -->",
-          "<!-- recital syntax=console cmd=bash -->",
+          "<!-- recital cmd: bash -->",
+          "<!-- recital: { cmd: bash, syntax: console } -->",
           "```console",
           "$ true",
           "```",

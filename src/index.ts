@@ -22,6 +22,7 @@ export {
 export { ShellSession, type ShellOptions, type CommandResult } from "./shell.js";
 export {
   Runner,
+  DirectiveSession,
   runDocument,
   runParsedDocument,
   type RunnerOptions,

@@ -4,8 +4,8 @@ A single document can describe more than one session. Here two directives
 select blocks by their fence **pragma** — the text after the language token.
 Each directive owns one persistent `bash` session.
 
-<!-- recital syntax=console cmd=bash pragma="session A" -->
-<!-- recital syntax=console cmd=bash pragma="session B" -->
+<!-- recital: { cmd: bash, syntax: console, pragma: "session A" } -->
+<!-- recital: { cmd: bash, syntax: console, pragma: "session B" } -->
 
 Session A sets a variable:
 

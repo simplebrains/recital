@@ -1,6 +1,6 @@
 # A stateful session
 
-<!-- recital syntax=console cmd=bash -->
+<!-- recital: { cmd: bash, syntax: console } -->
 
 The session keeps its working directory between commands, and can capture
 nondeterministic values into named bindings that later steps reuse.

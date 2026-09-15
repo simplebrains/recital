@@ -19,7 +19,7 @@ import { afterAll, describe, test } from "vitest";
 
 import { resolveMarkdownFiles } from "./files.js";
 import { parseMarkdown } from "./parser.js";
-import { Runner, type RunnerOptions } from "./runner.js";
+import { DirectiveSession, type RunnerOptions } from "./runner.js";
 import type { ParsedDocument, RecitalDirective } from "./types.js";
 
 export type DescribeMarkdownOptions = RunnerOptions;
@@ -44,8 +44,6 @@ export function describeMarkdown(
     try {
       parsed = parseMarkdown(source, { path: file });
     } catch (err) {
-      // A malformed document (e.g. an ambiguous block or a directive missing
-      // cmd=) surfaces as a single failing test for the file.
       describe(file, () => {
         test("parse", () => {
           throw err;
@@ -58,31 +56,34 @@ export function describeMarkdown(
     if (runnable.length === 0) continue;
 
     describe(file, () => {
-      const sessions = new Map<RecitalDirective, Runner>();
+      const sessions = new Map<RecitalDirective, DirectiveSession>();
+      // Shared sessions close here whether tests passed or failed. Isolate
+      // sessions close in each test's `finally`. Process kill / hard abort can
+      // still skip hooks — same caveat as any vitest afterAll.
       afterAll(async () => {
-        for (const runner of sessions.values()) await runner.close();
+        for (const session of sessions.values()) await session.close();
       });
 
       for (const block of runnable) {
         const directive = block.directive!;
         test(blockName(block.heading, block.line), async () => {
-          let runner: Runner;
-          if (directive.isolate) {
-            runner = new Runner({ ...options, shell: directive.cmd });
-          } else {
-            runner =
-              sessions.get(directive) ?? new Runner({ ...options, shell: directive.cmd });
-            sessions.set(directive, runner);
-          }
-
+          let session: DirectiveSession | undefined;
           try {
-            const result = await runner.runBlock(block);
+            if (directive.isolate) {
+              session = await DirectiveSession.open(directive, options);
+            } else {
+              session =
+                sessions.get(directive) ?? (await DirectiveSession.open(directive, options));
+              sessions.set(directive, session);
+            }
+
+            const result = await session.runBlock(block);
             if (!result.ok) {
               const failed = result.interactions.find((i) => !i.ok);
               throw new Error(failed?.error ?? "Block failed.");
             }
           } finally {
-            if (directive.isolate) await runner.close();
+            if (directive.isolate && session) await session.close();
           }
         });
       }

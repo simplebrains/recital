@@ -15,9 +15,10 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { accessSync, constants } from "node:fs";
 
 export interface ShellOptions {
-  /** Shell executable. Default: `bash`. */
+  /** Shell executable. Default: `bash` (resolved to an absolute path when possible). */
   shell?: string;
   /** Initial working directory. Default: `process.cwd()`. */
   cwd?: string;
@@ -36,6 +37,26 @@ interface Pending {
   reject: (e: Error) => void;
 }
 
+/**
+ * Resolve a bare shell name to a real executable. On some macOS setups PATH
+ * contains text stubs (e.g. `/usr/local/bin/bash` → a Homebrew path) that
+ * spawn as ENOEXEC; prefer well-known absolute locations for `bash`.
+ */
+function resolveShell(shell: string): string {
+  if (shell.includes("/") || shell.includes("\\")) return shell;
+  if (shell === "bash") {
+    for (const candidate of ["/bin/bash", "/usr/bin/bash"]) {
+      try {
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      } catch {
+        // try next
+      }
+    }
+  }
+  return shell;
+}
+
 export class ShellSession {
   private proc: ChildProcessWithoutNullStreams;
   private buffer = "";
@@ -44,7 +65,7 @@ export class ShellSession {
   private exitError: Error | null = null;
 
   constructor(opts: ShellOptions = {}) {
-    const shell = opts.shell ?? "bash";
+    const shell = resolveShell(opts.shell ?? "bash");
     const env = { ...process.env, ...opts.env } as NodeJS.ProcessEnv;
     this.proc = spawn(shell, [], {
       cwd: opts.cwd ?? process.cwd(),

@@ -6,7 +6,14 @@
  * A document may declare several sessions (one per non-`isolate` directive);
  * blocks are dispatched to the session of the directive that owns them, but are
  * always executed in document order, even when sessions are interleaved.
+ *
+ * Session lifecycle (`cwd: temp`, `env`, `setup`, `teardown`) is owned by
+ * {@link DirectiveSession}.
  */
+
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   matchBlock,
@@ -82,7 +89,23 @@ export class Runner {
       };
     }
 
-    const { output, exitCode } = await this.session.run(executed);
+    let output: string;
+    let exitCode: number;
+    try {
+      ({ output, exitCode } = await this.session.run(executed));
+    } catch (err) {
+      // Shell death / I/O errors become a failed interaction so callers can
+      // still run teardown in a `finally` rather than aborting uncleanly.
+      return {
+        interaction,
+        executed,
+        ok: false,
+        exitCode: -1,
+        output: "",
+        error: (err as Error).message,
+      };
+    }
+
     const actual = normalizeOutput(output, this.options.normalize);
 
     // recital asserts output, not exit status; the exit code is informational.
@@ -122,6 +145,111 @@ export class Runner {
   }
 }
 
+/** Upper bound for a teardown shell snippet before we abandon it and kill the shell. */
+const TEARDOWN_TIMEOUT_MS = 10_000;
+
+/**
+ * A shell session bound to one recital directive, including lifecycle hooks
+ * (`setup` / `teardown`) and optional host-managed temp `cwd`.
+ *
+ * {@link DirectiveSession.close} always attempts teardown (then kills the shell
+ * and removes a temp cwd), whether the session's blocks passed or failed.
+ * Teardown is best-effort: a hung/dead shell will not block process cleanup
+ * forever (see TEARDOWN_TIMEOUT_MS).
+ */
+export class DirectiveSession {
+  readonly runner: Runner;
+  private readonly tempDir: string | null;
+  private readonly teardown: string | undefined;
+  private closed = false;
+
+  private constructor(runner: Runner, tempDir: string | null, teardown: string | undefined) {
+    this.runner = runner;
+    this.tempDir = tempDir;
+    this.teardown = teardown;
+  }
+
+  /** Open a session for `directive`, applying cwd/env/setup. */
+  static async open(
+    directive: RecitalDirective,
+    options: RunnerOptions = {},
+  ): Promise<DirectiveSession> {
+    let tempDir: string | null = null;
+    let cwd = options.cwd;
+    if (directive.cwd === "temp") {
+      tempDir = await mkdtemp(join(tmpdir(), "recital-"));
+      cwd = tempDir;
+    } else if (directive.cwd !== undefined) {
+      cwd = directive.cwd;
+    }
+
+    const env = { ...options.env, ...directive.env };
+    const runner = new Runner({
+      ...options,
+      shell: directive.cmd,
+      cwd,
+      env,
+    });
+
+    const session = new DirectiveSession(runner, tempDir, directive.teardown);
+    if (directive.setup) {
+      try {
+        const result = await runner.session.run(directive.setup);
+        if (result.exitCode !== 0) {
+          await session.close();
+          throw new Error(
+            `recital setup on line ${directive.line} exited ${result.exitCode}:\n${result.output}`,
+          );
+        }
+      } catch (err) {
+        await session.close();
+        throw err;
+      }
+    }
+    return session;
+  }
+
+  async runBlock(block: Block): Promise<BlockResult> {
+    return this.runner.runBlock(block);
+  }
+
+  /**
+   * Run teardown (if any), close the shell, and remove a temp cwd.
+   * Safe to call more than once. Always proceeds to shell/temp cleanup even if
+   * the teardown snippet fails, times out, or the shell is already dead.
+   */
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      if (this.teardown) {
+        try {
+          await Promise.race([
+            this.runner.session.run(this.teardown),
+            new Promise<never>((_, reject) => {
+              const timer = setTimeout(
+                () => reject(new Error("recital teardown timed out")),
+                TEARDOWN_TIMEOUT_MS,
+              );
+              timer.unref?.();
+            }),
+          ]);
+        } catch {
+          // Still tear down the shell / temp dir even if teardown fails.
+        }
+      }
+    } finally {
+      try {
+        await this.runner.close();
+      } finally {
+        if (this.tempDir) {
+          await rm(this.tempDir, { recursive: true, force: true });
+        }
+      }
+    }
+  }
+}
+
 /** Parse and run a Markdown source string end-to-end. */
 export async function runDocument(
   source: string,
@@ -135,36 +263,45 @@ export async function runDocument(
  * Run an already-parsed document end-to-end. Each non-`isolate` directive gets
  * one persistent session shared by its blocks; `isolate` directives get a fresh
  * session per block. Blocks with no matching directive are skipped.
+ *
+ * Shared sessions are always closed in a `finally` (pass or fail). Isolated
+ * sessions are closed in a per-block `finally`.
  */
 export async function runParsedDocument(
   parsed: ParsedDocument,
   options: RunnerOptions = {},
 ): Promise<DocumentResult> {
-  const sessions = new Map<RecitalDirective, Runner>();
+  const sessions = new Map<RecitalDirective, DirectiveSession>();
   const blocks: BlockResult[] = [];
   let ok = true;
 
   try {
     for (const block of parsed.blocks) {
       const directive = block.directive;
-      if (!directive) continue; // not owned by any directive: recital ignores it
+      if (!directive) continue;
 
-      let runner: Runner;
       if (directive.isolate) {
-        runner = new Runner({ ...options, shell: directive.cmd });
-      } else {
-        runner = sessions.get(directive) ?? new Runner({ ...options, shell: directive.cmd });
-        sessions.set(directive, runner);
+        const session = await DirectiveSession.open(directive, options);
+        try {
+          const result = await session.runBlock(block);
+          blocks.push(result);
+          if (!result.ok) ok = false;
+        } finally {
+          await session.close();
+        }
+        continue;
       }
 
-      const result = await runner.runBlock(block);
-      if (directive.isolate) await runner.close();
+      const session =
+        sessions.get(directive) ?? (await DirectiveSession.open(directive, options));
+      sessions.set(directive, session);
 
+      const result = await session.runBlock(block);
       blocks.push(result);
       if (!result.ok) ok = false;
     }
   } finally {
-    for (const runner of sessions.values()) await runner.close();
+    for (const session of sessions.values()) await session.close();
   }
 
   return { path: parsed.path, ok, blocks };

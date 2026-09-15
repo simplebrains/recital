@@ -4,7 +4,7 @@ Write a Markdown file that *looks* like a terminal session, and run it — a
 **recital** of that session. The same document is documentation a human can
 read, and an executable test a machine can verify.
 
-<!-- recital syntax=console cmd=bash -->
+<!-- recital: { cmd: bash, syntax: console } -->
 
 ```console
 $ echo hello
@@ -24,35 +24,53 @@ npm install --save-dev @simplebrains/recital
 ## Opting in with a directive
 
 By default recital interprets **nothing**. A document opts in with one or more
-directive comments — invisible in rendered Markdown:
+YAML comments — invisible in rendered Markdown:
 
 ````markdown
-<!-- recital syntax=console cmd=bash -->
+<!-- recital: { cmd: bash, syntax: console } -->
+````
+
+Or the equivalent prefix sugar / multi-line form:
+
+````markdown
+<!-- recital cmd: bash -->
+
+<!-- recital:
+cmd: bash
+syntax: console
+-->
 ````
 
 A directive both configures a **session** and selects which fenced code blocks
 belong to it:
 
-- `cmd=<shell>` — **required**; the command used to drive the session (e.g. `bash`).
-- `syntax=<language>` — only match blocks fenced with this language.
-- `pragma=<text>` — only match blocks whose fence **pragma** (the text after the
-  language token) contains this string.
-- `isolate` — run each matching block in its own fresh session. By default all
-  blocks matching a directive share one persistent session.
+| Field       | Meaning                                                                 |
+| ----------- | ----------------------------------------------------------------------- |
+| `cmd`       | **Required.** Command used to drive the session (e.g. `bash`).          |
+| `syntax`    | Only match blocks fenced with this language.                            |
+| `pragma`    | Only match blocks whose fence **pragma** contains this string.          |
+| `isolate`   | Run each matching block in its own fresh session.                       |
+| `cwd`       | `"temp"` (host-managed temp dir, removed on end) or a path string.      |
+| `env`       | Map of environment variables injected into the session.                 |
+| `setup`     | Shell snippet run once when the session starts.                         |
+| `teardown`  | Shell snippet always run when the session ends.                         |
+| `bind`      | Optional literal-identity set declared at this point (see below).       |
 
 Directives are **file-global**: every code block is matched against all of them.
 A block that matches no directive is left alone; a block that matches *more than
-one* is an error (make the selectors disjoint). `cmd=` is required.
+one* is an error (make the selectors disjoint). Prefix sugar does **not** merge
+across comments — `<!-- recital cmd: bash -->` and `<!-- recital syntax: console -->`
+are two separate comments, and the second errors (session fields without `cmd`).
 
 ### More than one session
 
 A document can describe several sessions at once — select them apart by
-`syntax=` or `pragma=`. Blocks are dispatched to their own session but always
+`syntax` or `pragma`. Blocks are dispatched to their own session but always
 **executed in document order**, even when the sessions are interleaved:
 
 ````markdown
-<!-- recital syntax=console cmd=bash pragma="session A" -->
-<!-- recital syntax=console cmd=bash pragma="session B" -->
+<!-- recital: { cmd: bash, syntax: console, pragma: "session A" } -->
+<!-- recital: { cmd: bash, syntax: console, pragma: "session B" } -->
 
 ```console session A
 $ X=1
@@ -66,6 +84,21 @@ $ X=99
 $ echo "$X"
 1
 ```
+````
+
+### Environment setup for CI
+
+Use `cwd: temp` plus optional `setup` / `teardown` when a session needs an
+isolated working directory:
+
+````markdown
+<!-- recital:
+cmd: bash
+syntax: console
+cwd: temp
+setup: |
+  npm ci --ignore-scripts
+-->
 ````
 
 ## The format
@@ -124,11 +157,10 @@ lines trimmed). Captured bindings are per session.
 
 `{{name}}` markup inside a block can spoil the illusion of a real terminal
 session. To keep the fenced block **fully literal**, declare a value to be *an
-identity to itself* in an HTML comment *outside* the fence — using a
-real-looking value in quotes:
+identity to itself* with a `bind` comment — using a real-looking value:
 
 ````markdown
-<!-- "/var/folders/xx/T/tmp.abc123" -->
+<!-- recital bind: "/var/folders/xx/T/tmp.abc123" -->
 
 ```console
 $ cd "$(mktemp -d)"
@@ -142,18 +174,27 @@ still in /var/folders/xx/T/tmp.abc123
 The point is **identity**: wherever that literal string appears in the session,
 every occurrence is the same value — captured on first sight, back-referenced
 (and substituted into commands) everywhere after — exactly like `{{workdir}}`,
-but the transcript still reads like an ordinary session and nothing needs a
-name.
+but the transcript still reads like an ordinary session.
 
-Add a name and/or a type if it helps the prose. Unlike directives, identity
-declarations are **positional** — they apply to the blocks that follow them:
+`bind` accepts a string, a sequence, or a name mapping. Unlike session
+directives, bind comments are **positional** — they apply to the blocks that
+follow them:
 
-| Declaration                        | Meaning                                  |
-| ---------------------------------- | ---------------------------------------- |
-| `<!-- "…" -->`                     | Anonymous identity.                      |
-| `<!-- workdir "…" -->`             | Named identity.                          |
-| `<!-- workdir:path "…" -->`        | Named identity, capture constrained.     |
-| `<!-- :path "…" -->`               | Anonymous identity, capture constrained. |
+````markdown
+<!-- recital bind: "/tmp/a" -->
+
+<!-- recital bind:
+- "/tmp/a"
+- workdir: "/tmp/b"
+- { type: uuid, text: "3f2504e0-4f89-41d3-9a0c-0305e82c3301" }
+-->
+
+<!-- recital bind:
+answer:
+  type: int
+  text: "42"
+-->
+````
 
 ## Running from the CLI
 
@@ -185,20 +226,21 @@ as a second argument, e.g. `describeMarkdown("docs/", { cwd: "packages/app" })`.
 import { runDocument, parseMarkdown, Runner } from "recital";
 
 const result = await runDocument(
-  "<!-- recital cmd=bash -->\n```console\n$ echo hi\nhi\n```",
+  "<!-- recital cmd: bash -->\n```console\n$ echo hi\nhi\n```",
 );
 result.ok; // true
 ```
 
 - `parseMarkdown(source, opts)` → directives + structured blocks/interactions.
 - `runDocument(source, opts)` / `runParsedDocument(parsed, opts)` → run end-to-end.
+- `DirectiveSession` → open/close a directive's shell with setup/teardown/cwd.
 - `Runner` → drive blocks one at a time over a single shared session.
 - `matchBlock`, `matchLine`, `normalizeOutput`, `substituteBindings` → the
   matcher internals.
 
 ## Notes & limitations
 
-- The runner drives a shell (via `cmd=`) by feeding commands over stdin and
+- The runner drives a shell (via `cmd`) by feeding commands over stdin and
   delimiting output with a random sentinel. Commands that **read from stdin**
   interactively (e.g. a bare `cat`) will consume that framing and are not
   supported — pipe input in instead.

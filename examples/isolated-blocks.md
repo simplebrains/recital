@@ -1,9 +1,9 @@
 # Isolated blocks
 
-Add the `isolate` flag and every matching block runs in its own fresh session,
+Set `isolate: true` and every matching block runs in its own fresh session,
 sharing nothing with the others.
 
-<!-- recital syntax=console cmd=bash isolate -->
+<!-- recital: { cmd: bash, syntax: console, isolate: true } -->
 
 The first block sets a variable:
 
