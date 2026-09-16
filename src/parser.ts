@@ -7,10 +7,12 @@
  *   <!-- recital cmd: bash -->
  *   <!-- recital: { cmd: bash, syntax: console } -->
  *   <!-- recital bind: "/tmp/x" -->
+ *   <!-- recital include: ./setup.md -->
  *
  * Prefix sugar `<!-- recital <key>: <yaml> -->` desugars to `{ <key>: <yaml> }`.
  * A mapping with `cmd` is a file-global session directive; a mapping with only
- * `bind` is a positional literal-identity declaration.
+ * `bind` is a positional literal-identity declaration. `include` is expanded
+ * before parsing (see {@link expandIncludes}) and is not a session setting.
  *
  * Inside a block, `$ ` introduces a command; `> ` continues the previous
  * command; every other line up to the next command is that command's expected
@@ -19,9 +21,13 @@
 
 import { parse as parseYaml } from "yaml";
 
+import {
+  expandIncludes,
+  type ExpandIncludesOptions,
+} from "./include.js";
 import type { Block, Interaction, ParsedDocument, RecitalDirective } from "./types.js";
 
-export interface ParseOptions {
+export interface ParseOptions extends ExpandIncludesOptions {
   /** Path/label recorded on the parsed document. */
   path?: string;
 }
@@ -381,11 +387,18 @@ function classifyComment(
     throw new Error(`recital comment on line ${line} is empty.`);
   }
 
+  if ("include" in map) {
+    throw new Error(
+      `recital include on line ${line} must stand alone and is expanded before ` +
+        `parsing — do not combine it with session or bind fields.`,
+    );
+  }
+
   const unknown = keys.filter((k) => !SESSION_KEYS.has(k));
   if (unknown.length) {
     throw new Error(
       `recital comment on line ${line} has unknown field(s): ${unknown.join(", ")}. ` +
-        `Known fields: ${[...SESSION_KEYS].join(", ")}.`,
+        `Known fields: ${[...SESSION_KEYS].join(", ")}, include.`,
     );
   }
 
@@ -423,7 +436,8 @@ interface RawBlock {
 
 /** Parse a Markdown document into directives and code blocks. */
 export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDocument {
-  const lines = source.split(/\r\n?|\n/);
+  const expanded = expandIncludes(source, opts);
+  const lines = expanded.split(/\r\n?|\n/);
   const directives: RecitalDirective[] = [];
   const rawBlocks: RawBlock[] = [];
 

@@ -41,6 +41,18 @@ syntax: console
 -->
 ````
 
+Shared boilerplate (a session directive, bind set, etc.) can live in another
+file and be **included** in place — not as a session field, but as a
+source-level rewrite before parsing:
+
+````markdown
+<!-- recital include: ./fragments/bash-console.md -->
+````
+
+Paths are relative to the file that contains the include; nested includes
+resolve relative to themselves. Circular includes are an error. Do not combine
+`include` with other fields in the same comment.
+
 A directive both configures a **session** and selects which fenced code blocks
 belong to it:
 
@@ -231,7 +243,9 @@ const result = await runDocument(
 result.ok; // true
 ```
 
-- `parseMarkdown(source, opts)` → directives + structured blocks/interactions.
+- `parseMarkdown(source, opts)` → expands includes, then returns directives +
+  structured blocks/interactions.
+- `expandIncludes(source, opts)` → source-level include rewrite only.
 - `runDocument(source, opts)` / `runParsedDocument(parsed, opts)` → run end-to-end.
 - `DirectiveSession` → open/close a directive's shell with setup/teardown/cwd.
 - `Runner` → drive blocks one at a time over a single shared session.

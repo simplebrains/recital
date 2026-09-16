@@ -9,6 +9,10 @@ export {
   type IdentityDeclaration,
 } from "./parser.js";
 export {
+  expandIncludes,
+  type ExpandIncludesOptions,
+} from "./include.js";
+export {
   compileLine,
   matchLine,
   matchBlock,
