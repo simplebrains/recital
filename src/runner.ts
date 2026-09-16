@@ -40,9 +40,10 @@ export interface RunnerOptions extends ShellOptions {
   normalize?: NormalizeOptions;
   /**
    * When set, drive the session as an interactive REPL synced on this prompt
-   * (see {@link PromptSession}) instead of a bash-sentinel shell.
+   * (or any of these prompts — see {@link PromptSession}) instead of a
+   * bash-sentinel shell.
    */
-  prompt?: string;
+  prompt?: string | readonly string[];
   /** Bash snippet run before the REPL starts (prompt mode only). */
   setup?: string;
 }

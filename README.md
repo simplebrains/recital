@@ -63,7 +63,8 @@ belong to it:
 | Field       | Meaning                                                                 |
 | ----------- | ----------------------------------------------------------------------- |
 | `cmd`       | **Required.** Command used to drive the session (e.g. `bash`).          |
-| `prompt`    | Drive `cmd` as an interactive REPL, syncing on this prompt string (see [Driving a REPL](#driving-a-repl)). |
+| `prompt`    | Drive `cmd` as an interactive REPL, syncing on this prompt string or list (see [Driving a REPL](#driving-a-repl)). |
+| `continue`  | Continuation marker string or list for multi-line commands (default `"> "` / `">"`). |
 | `syntax`    | Only match blocks fenced with this language.                            |
 | `pragma`    | Only match blocks whose fence **pragma** contains this string.          |
 | `isolate`   | Run each matching block in its own fresh session.                       |
@@ -85,24 +86,31 @@ are two separate comments, and the second errors (session fields without `cmd`).
 By default recital drives a bash-like shell: it feeds each command over stdin
 and delimits the output with an injected sentinel. That can't drive a program
 that reads its **own** stdin — an interactive REPL (a language shell, a database
-client, an app's own `> ` prompt). For those, give the directive a `prompt`:
+client, an app's own prompt). For those, give the directive a `prompt`:
 
 ````markdown
-<!-- recital: { cmd: "python3 -i -q", prompt: ">>> ", syntax: console } -->
+<!-- recital: { cmd: "python3 -i -q", prompt: ">>> ", continue: ["... ", "..."], syntax: console } -->
 
 ```console
->>> 1 + 1
-2
->>> "ab" * 3
-'ababab'
+>>> def twice(x):
+...   return x * 2
+...
+>>> twice(21)
+42
 ```
 ````
 
-With `prompt` set, recital launches `cmd` as a REPL and treats the **prompt
-reappearing** as the end-of-command signal — the one assumption that holds for
-an arbitrary REPL. In prompt mode the prompt itself is also a **command marker**,
-so a transcript can read exactly as the user sees it (`>>> 1 + 1`); the usual
-`$ ` marker keeps working too, and the two may be mixed.
+With `prompt` set, recital launches `cmd` as a REPL and treats **any of those
+prompts reappearing** as the end-of-command signal — the one assumption that
+holds for an arbitrary REPL. In prompt mode each prompt is also a **command
+marker**, so a transcript can read exactly as the user sees it (`>>> 1 + 1`);
+the usual `$ ` marker keeps working too, and the two may be mixed.
+
+`prompt` and `continue` each accept a string or a list of strings (matched
+longest-first). Continuations are only a parse-time concern — they join into
+one command before it is sent — and default to `"> "` / `">"` when omitted.
+Put primary/ready prompts in `prompt` and secondary prompts (Python `... `,
+psql `- `, …) in `continue`; don't overlap the two sets.
 
 Details and constraints:
 
@@ -112,9 +120,10 @@ Details and constraints:
   folded onto one ordered stream. `teardown` is not run in prompt mode (the REPL
   replaces the shell); use
   `cwd: temp` for cleanup.
-- The program must print `prompt` when it is ready for input — including once at
-  startup. REPLs that only prompt on a TTY may need a flag to force it
-  (`python3 -i`, `node -i`, `bash --norc -i` with a set `PS1`, …).
+- The program must print one of the configured `prompt` strings when it is ready
+  for input — including once at startup. REPLs that only prompt on a TTY may
+  need a flag to force it (`python3 -i`, `node -i`, `bash --norc -i` with a set
+  `PS1`, …).
 - Output is matched exactly as in any session; a leading echoed copy of the
   command (some shells echo the line they read on a pipe) is stripped.
 
@@ -162,7 +171,8 @@ setup: |
 Inside a runnable block:
 
 - a line beginning with `$ ` is a **command** sent to the shell;
-- a line beginning with `> ` continues the previous command;
+- a line beginning with a configured **continuation** marker (default `> ` /
+  `>`) continues the previous command;
 - every other line, up to the next command, is that command's **expected
   output**.
 

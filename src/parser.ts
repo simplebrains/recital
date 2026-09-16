@@ -15,9 +15,10 @@
  * regex fragments; `bind` is a positional literal-identity declaration.
  * `include` is expanded before parsing (see {@link expandIncludes}).
  *
- * Inside a block, `$ ` introduces a command; `> ` continues the previous
- * command; every other line up to the next command is that command's expected
- * output.
+ * Inside a block, `$ ` introduces a command; configured continuation markers
+ * (default `> ` / `>`) continue the previous command; every other line up to
+ * the next command is that command's expected output. In prompt mode each
+ * configured prompt is also a command marker.
  */
 
 import { parse as parseYaml } from "yaml";
@@ -26,6 +27,11 @@ import {
   expandIncludes,
   type ExpandIncludesOptions,
 } from "./include.js";
+import {
+  DEFAULT_CONTINUE,
+  longestPrefix,
+  parseStringOrList,
+} from "./markers.js";
 import {
   normalizeTypePattern,
   type TypeRegistry,
@@ -60,6 +66,7 @@ const TYPE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const COMMENT_KEYS = new Set([
   "cmd",
   "prompt",
+  "continue",
   "syntax",
   "pragma",
   "isolate",
@@ -74,6 +81,7 @@ const COMMENT_KEYS = new Set([
 const SESSION_ONLY_KEYS = new Set([
   "cmd",
   "prompt",
+  "continue",
   "syntax",
   "pragma",
   "isolate",
@@ -166,40 +174,55 @@ function expandTypeOnlyBinds(
   return expanded;
 }
 
-const CONTINUATION_RE = /^>\s?(.*)$/;
 const DOLLAR_COMMAND_RE = /^\$\s?(.*)$/;
 
 /**
  * Detect a command line and return its text (without the marker), or null.
  *
- * `$ cmd` always marks a command. In prompt mode the session's prompt is also a
- * command marker, so a REPL transcript can be written exactly as the user sees
- * it — `omg> query …` rather than `$ query …`. (A prompt of `> ` would shadow
- * the `>` continuation marker; don't use one.)
+ * `$ cmd` always marks a command. In prompt mode each configured prompt is also
+ * a command marker, so a REPL transcript can be written exactly as the user
+ * sees it — `omg> query …` rather than `$ query …`. (A prompt that equals a
+ * continuation marker would steal those lines; don't overlap them.)
  */
-function matchCommandLine(text: string, prompt?: string): string | null {
-  if (prompt && text.startsWith(prompt)) return text.slice(prompt.length);
+function matchCommandLine(
+  text: string,
+  prompts?: readonly string[],
+): string | null {
+  if (prompts?.length) {
+    const hit = longestPrefix(text, prompts);
+    if (hit) return hit.rest;
+  }
   const m = DOLLAR_COMMAND_RE.exec(text);
   return m ? m[1]! : null;
+}
+
+/** Detect a continuation line and return the continued text, or null. */
+function matchContinueLine(
+  text: string,
+  continues: readonly string[],
+): string | null {
+  const hit = longestPrefix(text, continues);
+  return hit ? hit.rest : null;
 }
 
 /** Collect command/expected text from a block body for type-only scanning. */
 function collectScanTexts(
   lines: { text: string; line: number }[],
-  prompt?: string,
+  prompts: readonly string[] | undefined,
+  continues: readonly string[],
 ): string[] {
   const texts: string[] = [];
   let currentCmd: string | null = null;
 
   for (const { text } of lines) {
-    const cmd = matchCommandLine(text, prompt);
-    const contMatch = CONTINUATION_RE.exec(text);
+    const cmd = matchCommandLine(text, prompts);
+    const cont = matchContinueLine(text, continues);
 
     if (cmd !== null) {
       if (currentCmd !== null) texts.push(currentCmd);
       currentCmd = cmd;
-    } else if (contMatch && currentCmd !== null) {
-      currentCmd += "\n" + contMatch[1]!;
+    } else if (cont !== null && currentCmd !== null) {
+      currentCmd += "\n" + cont;
     } else if (currentCmd !== null) {
       texts.push(text);
     }
@@ -215,10 +238,11 @@ function parseInteractions(
   types: TypeRegistry,
   nextAnon: () => string,
   blockLine: number,
-  prompt?: string,
+  prompts: readonly string[] | undefined,
+  continues: readonly string[],
 ): Interaction[] {
   const expanded = expandTypeOnlyBinds(
-    collectScanTexts(lines, prompt),
+    collectScanTexts(lines, prompts, continues),
     declarations,
     types,
     nextAnon,
@@ -229,14 +253,14 @@ function parseInteractions(
   let current: Interaction | null = null;
 
   for (const { text, line } of lines) {
-    const cmd = matchCommandLine(text, prompt);
-    const contMatch = CONTINUATION_RE.exec(text);
+    const cmd = matchCommandLine(text, prompts);
+    const cont = matchContinueLine(text, continues);
 
     if (cmd !== null) {
       if (current) interactions.push(current);
       current = { command: cmd, expected: [], line };
-    } else if (contMatch && current && current.expected.length === 0) {
-      current.command += "\n" + contMatch[1]!;
+    } else if (cont !== null && current && current.expected.length === 0) {
+      current.command += "\n" + cont;
     } else if (current) {
       current.expected.push(text);
     }
@@ -476,13 +500,13 @@ function parseSessionMapping(
     throw new Error(`recital directive on line ${line} is missing required field cmd.`);
   }
 
-  let prompt: string | undefined;
-  if (map.prompt !== undefined) {
-    if (typeof map.prompt !== "string" || !map.prompt) {
-      throw new Error(`recital prompt on line ${line} must be a non-empty string.`);
-    }
-    prompt = map.prompt;
-  }
+  const prompt =
+    map.prompt !== undefined ? parseStringOrList(map.prompt, "prompt", line) : undefined;
+
+  const cont =
+    map.continue !== undefined
+      ? parseStringOrList(map.continue, "continue", line)
+      : [...DEFAULT_CONTINUE];
 
   let syntax: string | undefined;
   if (map.syntax !== undefined) {
@@ -541,7 +565,19 @@ function parseSessionMapping(
     map.bind !== undefined ? parseBind(map.bind, line, nextAnon) : [];
 
   return {
-    directive: { cmd, prompt, syntax, pragma, isolate, cwd, env, setup, teardown, line },
+    directive: {
+      cmd,
+      prompt,
+      continue: cont,
+      syntax,
+      pragma,
+      isolate,
+      cwd,
+      env,
+      setup,
+      teardown,
+      line,
+    },
     identities,
     types,
   };
@@ -741,8 +777,8 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
   }
 
   const blocks: Block[] = rawBlocks.map((rb) => {
-    // Resolve the owning directive first: in prompt mode its prompt doubles as a
-    // command marker, so the transcript reads like the real REPL (`omg> …`).
+    // Resolve the owning directive first: in prompt mode its prompts double as
+    // command markers, so the transcript reads like the real REPL (`omg> …`).
     const directive = matchDirective(rb.lang, rb.pragma, directives, rb.line);
     return {
       lang: rb.lang,
@@ -754,6 +790,7 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
         nextAnon,
         rb.line,
         directive?.prompt,
+        directive?.continue ?? DEFAULT_CONTINUE,
       ),
       line: rb.line,
       heading: rb.heading,

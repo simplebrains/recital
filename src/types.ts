@@ -10,16 +10,27 @@ export interface RecitalDirective {
   /** The command used to drive the session (e.g. `bash`). Required. */
   cmd: string;
   /**
-   * Prompt string the driven program prints when it is ready for the next line
-   * (e.g. `">>> "` for a Python REPL, `"omg> "` for an omgbase shell). When set,
-   * the session runs in **prompt mode**: `cmd` is launched as an interactive
-   * REPL and each command's output is delimited by the prompt reappearing,
-   * instead of by an injected bash sentinel. This is what lets recital drive a
-   * program that reads its own stdin — which the default bash-sentinel mode
-   * cannot. In prompt mode `setup` still runs (as a bash snippet) before the
-   * REPL starts; `teardown` is not run (the REPL replaces the shell).
+   * Prompt string(s) the driven program prints when it is ready for the next
+   * line (e.g. `">>> "` for a Python REPL, `"omg> "` for an omgbase shell).
+   * Accepts a string or a list; stored normalized as a non-empty array. When
+   * set, the session runs in **prompt mode**: `cmd` is launched as an
+   * interactive REPL and each command's output is delimited by any of these
+   * prompts reappearing, instead of by an injected bash sentinel. This is what
+   * lets recital drive a program that reads its own stdin — which the default
+   * bash-sentinel mode cannot. In prompt mode `setup` still runs (as a bash
+   * snippet) before the REPL starts; `teardown` is not run (the REPL replaces
+   * the shell). Each prompt is also a parse-time **command marker**.
    */
-  prompt?: string;
+  prompt?: string[];
+  /**
+   * Continuation marker(s) for multi-line commands in a transcript (default
+   * `"> "` / `">"`, the historical secondary-prompt forms). Accepts a string or
+   * a list; stored normalized as a non-empty array. A line beginning with one
+   * of these continues the previous command rather than starting a new one or
+   * counting as expected output. Use this for REPL secondary prompts
+   * (e.g. Python `"... "`).
+   */
+  continue: string[];
   /** Only match blocks whose fence language equals this, if set. */
   syntax?: string;
   /** Only match blocks whose fence pragma contains this substring, if set. */

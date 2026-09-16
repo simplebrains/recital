@@ -119,4 +119,33 @@ describe("prompt-mode documents", () => {
     const result = await runDocument(doc);
     expect(result.ok).toBe(true);
   });
+
+  it("syncs when any prompt in a list reappears", async () => {
+    const session = new PromptSession({
+      shell: CMD,
+      env: { REPL_PROMPTS: "a> |b> " },
+      prompt: ["a> ", "b> "],
+    });
+    try {
+      expect((await session.run("1 + 1")).output.trim()).toBe("2");
+      expect((await session.run("2 + 2")).output.trim()).toBe("4");
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("parses a list of prompts as command markers", async () => {
+    const doc = [
+      "<!-- recital:",
+      `cmd: "${CMD}"`,
+      'prompt: ["calc> ", "ready> "]',
+      "-->",
+      "```console",
+      "calc> 1 + 1",
+      "2",
+      "```",
+    ].join("\n");
+    const result = await runDocument(doc);
+    expect(result.ok).toBe(true);
+  });
 });

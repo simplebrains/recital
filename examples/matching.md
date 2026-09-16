@@ -1,9 +1,10 @@
 # Matching output
 
 Commands, continuations, and a few matcher tokens that `session.md` does not
-cover. A line beginning with `> ` continues the previous command (the
-secondary-prompt convention). A command with no following output lines is
-still run; its output is ignored.
+cover. A line beginning with a continuation marker (default `> ` / `>`)
+continues the previous command — the secondary-prompt convention. Override with
+`continue:` when a REPL uses a different secondary prompt. A command with no
+following output lines is still run; its output is ignored.
 
 <!-- recital: { cmd: bash, syntax: console } -->
 

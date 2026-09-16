@@ -147,6 +147,66 @@ describe("parseMarkdown", () => {
     expect(doc.blocks[0]!.interactions[0]!.command).toBe("echo one \\\ntwo");
   });
 
+  it("normalizes prompt and continue from a string or a list", () => {
+    const single = parseMarkdown(
+      '<!-- recital: { cmd: bash, prompt: ">>> ", continue: "... " } -->',
+    );
+    expect(single.directives[0]).toMatchObject({
+      prompt: [">>> "],
+      continue: ["... "],
+    });
+
+    const many = parseMarkdown(
+      [
+        "<!-- recital:",
+        "cmd: bash",
+        'prompt: ["a> ", "b> "]',
+        'continue: ["... ", ".. "]',
+        "-->",
+      ].join("\n"),
+    );
+    expect(many.directives[0]).toMatchObject({
+      prompt: ["a> ", "b> "],
+      continue: ["... ", ".. "],
+    });
+
+    const defaults = parseMarkdown("<!-- recital cmd: bash -->");
+    expect(defaults.directives[0]!.continue).toEqual(["> ", ">"]);
+    expect(defaults.directives[0]!.prompt).toBeUndefined();
+  });
+
+  it("rejects empty prompt or continue values", () => {
+    expect(() => parseMarkdown('<!-- recital: { cmd: bash, prompt: "" } -->')).toThrow(
+      /prompt/,
+    );
+    expect(() => parseMarkdown("<!-- recital: { cmd: bash, prompt: [] } -->")).toThrow(
+      /prompt/,
+    );
+    expect(() => parseMarkdown('<!-- recital: { cmd: bash, continue: "" } -->')).toThrow(
+      /continue/,
+    );
+  });
+
+  it("uses configured continue markers (e.g. Python secondary prompt)", () => {
+    const doc = parseMarkdown(
+      [
+        '<!-- recital: { cmd: bash, prompt: ">>> ", continue: ["... ", "..."] } -->',
+        "```console",
+        ">>> def f():",
+        "...   return 1",
+        "...",
+        ">>> f()",
+        "1",
+        "```",
+      ].join("\n"),
+    );
+    expect(doc.blocks[0]!.interactions.map((i) => i.command)).toEqual([
+      "def f():\n  return 1\n",
+      "f()",
+    ]);
+    expect(doc.blocks[0]!.interactions[1]!.expected).toEqual(["1"]);
+  });
+
   it("handles indented fences and tilde fences", () => {
     const doc = parseMarkdown(
       ["- item", "  ~~~console", "  $ echo x", "  x", "  ~~~"].join("\n"),

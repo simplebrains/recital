@@ -17,6 +17,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, constants } from "node:fs";
 
+import { longestSuffix } from "./markers.js";
+
 export interface ShellOptions {
   /** Shell executable. Default: `bash` (resolved to an absolute path when possible). */
   shell?: string;
@@ -35,7 +37,7 @@ export interface CommandResult {
  * The behaviour the runner needs from any session: feed it a command, get back
  * that command's output; and close it down. {@link ShellSession} drives a
  * bash-like shell with an injected sentinel; {@link PromptSession} drives an
- * interactive REPL and syncs on its prompt.
+ * interactive REPL and syncs on its prompt(s).
  */
 export interface Session {
   run(command: string): Promise<CommandResult>;
@@ -172,8 +174,12 @@ export class ShellSession implements Session {
 }
 
 export interface PromptSessionOptions extends ShellOptions {
-  /** The prompt string the driven program prints when it is ready for input. */
-  prompt: string;
+  /**
+   * Prompt string(s) the driven program prints when it is ready for input.
+   * A string or a non-empty list; the session is ready when the buffer ends
+   * with any of them (longest match wins).
+   */
+  prompt: string | readonly string[];
   /**
    * Optional bash snippet run once before the REPL is launched — useful for
    * building the working tree / environment the REPL then runs in. It executes
@@ -183,12 +189,13 @@ export interface PromptSessionOptions extends ShellOptions {
 }
 
 /**
- * Drive an interactive REPL by its prompt.
+ * Drive an interactive REPL by its prompt(s).
  *
  * Unlike {@link ShellSession}, which injects a bash-specific sentinel after each
- * command, this launches the program as a real REPL and treats the **prompt
- * reappearing** as the end-of-output signal — the only assumption that holds for
- * an arbitrary program reading its own stdin (a Python/Node/omgbase shell, …).
+ * command, this launches the program as a real REPL and treats **any configured
+ * prompt reappearing** as the end-of-output signal — the only assumption that
+ * holds for an arbitrary program reading its own stdin (a Python/Node/omgbase
+ * shell, …).
  *
  * The program is launched via `bash -c 'exec 2>&1; <setup>; exec <cmd>'`:
  * `exec 2>&1` folds stderr into stdout up front so setup output and the REPL's
@@ -200,7 +207,7 @@ export interface PromptSessionOptions extends ShellOptions {
 export class PromptSession implements Session {
   private proc: ChildProcessWithoutNullStreams;
   private buffer = "";
-  private readonly prompt: string;
+  private readonly prompts: readonly string[];
   private ready = false;
   private readyWaiters: Array<() => void> = [];
   private pending:
@@ -210,7 +217,11 @@ export class PromptSession implements Session {
   private exitError: Error | null = null;
 
   constructor(opts: PromptSessionOptions) {
-    this.prompt = opts.prompt;
+    const prompts = typeof opts.prompt === "string" ? [opts.prompt] : [...opts.prompt];
+    if (prompts.length === 0 || prompts.some((p) => !p)) {
+      throw new Error("PromptSession requires a non-empty prompt string or list.");
+    }
+    this.prompts = prompts;
     const bash = resolveShell("bash");
     const cmd = opts.shell ?? "bash";
     // `exec 2>&1` first so that *everything* after it — the setup snippet's
@@ -245,7 +256,7 @@ export class PromptSession implements Session {
     this.buffer += text;
     if (!this.ready) {
       // Drain the startup banner and the first prompt.
-      if (this.buffer.endsWith(this.prompt)) {
+      if (longestSuffix(this.buffer, this.prompts)) {
         this.ready = true;
         this.buffer = "";
         const waiters = this.readyWaiters;
@@ -260,13 +271,13 @@ export class PromptSession implements Session {
   private tryResolve(): void {
     const p = this.pending;
     if (!p) return;
-    // The prompt reappears (with nothing after it) once the REPL has finished
+    // A prompt reappears (with nothing after it) once the REPL has finished
     // this command's output and is blocking on the next line.
-    if (!this.buffer.endsWith(this.prompt)) return;
-    const raw = this.buffer.slice(0, this.buffer.length - this.prompt.length);
+    const hit = longestSuffix(this.buffer, this.prompts);
+    if (!hit) return;
     this.buffer = "";
     this.pending = null;
-    p.resolve({ output: stripEchoedCommand(raw, p.command), exitCode: 0 });
+    p.resolve({ output: stripEchoedCommand(hit.rest, p.command), exitCode: 0 });
   }
 
   private failPending(err: Error): void {
