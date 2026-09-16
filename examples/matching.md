@@ -17,9 +17,14 @@ beta
 ```
 
 A whole-line `...` is a **line ellipsis**: it matches zero or more arbitrary
-output lines. `{{:type}}` is an anonymous typed wildcard — it matches, but
-binds nothing. `{{name:type}}` still captures, so a later `{{name}}` must
-recur.
+output lines. Named types are declared with `recital type:`; `{{:type}}` is an
+anonymous typed wildcard — it matches, but binds nothing. `{{name:type}}`
+still captures, so a later `{{name}}` must recur.
+
+<!-- recital type:
+int: "-?\\d+"
+uuid: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+-->
 
 ```console
 $ printf '%s\n' start ignored noise end

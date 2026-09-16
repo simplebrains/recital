@@ -4,9 +4,34 @@ import {
   matchBlock,
   matchLine,
   normalizeOutput,
+  normalizeTypePattern,
+  resolveTypePattern,
   stripAnsi,
   substituteBindings,
 } from "../src/matcher.js";
+
+const types = {
+  int: "-?\\d+",
+  uuid: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+};
+
+describe("normalizeTypePattern", () => {
+  it("strips a leading ^ and trailing $", () => {
+    expect(normalizeTypePattern("^[0-9a-f]+$")).toBe("[0-9a-f]+");
+    expect(normalizeTypePattern("[0-9a-f]+")).toBe("[0-9a-f]+");
+  });
+});
+
+describe("resolveTypePattern", () => {
+  it("resolves any and user types", () => {
+    expect(resolveTypePattern("any", {})).toBe(".+?");
+    expect(resolveTypePattern("int", types)).toBe("-?\\d+");
+  });
+
+  it("throws on unknown types", () => {
+    expect(() => resolveTypePattern("int", {})).toThrow(/Unknown matcher type/);
+  });
+});
 
 describe("matchLine", () => {
   it("matches literal text exactly", () => {
@@ -20,13 +45,13 @@ describe("matchLine", () => {
   });
 
   it("captures typed values into bindings", () => {
-    const r = matchLine("id: {{x:int}}", "id: 42", {});
+    const r = matchLine("id: {{x:int}}", "id: 42", {}, types);
     expect(r.ok).toBe(true);
     expect(r.captures).toEqual({ x: "42" });
   });
 
   it("rejects values that do not fit the type", () => {
-    expect(matchLine("id: {{x:int}}", "id: abc", {}).ok).toBe(false);
+    expect(matchLine("id: {{x:int}}", "id: abc", {}, types).ok).toBe(false);
   });
 
   it("treats an already-bound name as a back-reference", () => {
@@ -45,9 +70,9 @@ describe("matchLine", () => {
     expect(r.captures).toEqual({});
   });
 
-  it("matches uuids", () => {
+  it("matches uuids via a user-defined type", () => {
     const uuid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
-    const r = matchLine("id={{u:uuid}}", `id=${uuid}`, {});
+    const r = matchLine("id={{u:uuid}}", `id=${uuid}`, {}, types);
     expect(r.ok).toBe(true);
     expect(r.captures.u).toBe(uuid);
   });
@@ -61,15 +86,15 @@ describe("matchBlock", () => {
   });
 
   it("threads captures across lines", () => {
-    const r = matchBlock(["id {{x:int}}", "same {{x}}"], ["id 7", "same 7"], {});
+    const r = matchBlock(["id {{x:int}}", "same {{x}}"], ["id 7", "same 7"], {}, types);
     expect(r.ok).toBe(true);
     expect(r.bindings.x).toBe("7");
   });
 
   it("fails when a back-reference across lines does not recur", () => {
-    expect(matchBlock(["id {{x:int}}", "same {{x}}"], ["id 7", "same 8"], {}).ok).toBe(
-      false,
-    );
+    expect(
+      matchBlock(["id {{x:int}}", "same {{x}}"], ["id 7", "same 8"], {}, types).ok,
+    ).toBe(false);
   });
 
   it("supports a `...` line that skips arbitrary output", () => {

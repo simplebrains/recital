@@ -1,6 +1,7 @@
 # A stateful session
 
 <!-- recital: { cmd: bash, syntax: console } -->
+<!-- recital type: { path: "[^\\s]+" } -->
 
 The session keeps its working directory between commands, and can capture
 nondeterministic values into named bindings that later steps reuse.

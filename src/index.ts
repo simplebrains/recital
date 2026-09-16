@@ -17,11 +17,15 @@ export {
   matchLine,
   matchBlock,
   normalizeOutput,
+  normalizeTypePattern,
+  resolveTypePattern,
   stripAnsi,
   substituteBindings,
+  ANY_PATTERN,
   type Bindings,
   type BlockMatchResult,
   type NormalizeOptions,
+  type TypeRegistry,
 } from "./matcher.js";
 export { ShellSession, type ShellOptions, type CommandResult } from "./shell.js";
 export {
@@ -40,5 +44,4 @@ export type {
   LineMatch,
   ParsedDocument,
   RecitalDirective,
-  TokenType,
 } from "./types.js";

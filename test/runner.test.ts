@@ -89,11 +89,31 @@ describe("runDocument", () => {
     const result = await runDocument(
       [
         "<!-- recital cmd: bash -->",
+        '<!-- recital type: { int: "-?\\\\d+" } -->',
         "```console",
         "$ echo token-12345",
         "token-{{id:int}}",
         '$ echo "again {{id}}"',
         "again {{id}}",
+        "```",
+      ].join("\n"),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("discovers identities via type-only bind", async () => {
+    const result = await runDocument(
+      [
+        "<!-- recital cmd: bash -->",
+        '<!-- recital type: { doc_id: "d_[a-z0-9]{7}" } -->',
+        "<!-- recital bind: { type: doc_id } -->",
+        "```console",
+        "$ printf 'd_%s\\n' 9f4k2qa 3xb7m0c 9f4k2qa",
+        "d_9f4k2qa",
+        "d_3xb7m0c",
+        "d_9f4k2qa",
+        '$ echo "first was d_9f4k2qa; second was d_3xb7m0c"',
+        "first was d_9f4k2qa; second was d_3xb7m0c",
         "```",
       ].join("\n"),
     );

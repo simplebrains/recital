@@ -21,6 +21,7 @@ import {
   substituteBindings,
   type Bindings,
   type NormalizeOptions,
+  type TypeRegistry,
 } from "./matcher.js";
 import { parseMarkdown, type ParseOptions } from "./parser.js";
 import { ShellSession, type ShellOptions } from "./shell.js";
@@ -74,7 +75,10 @@ export class Runner {
   }
 
   /** Run one interaction against the current session and bindings. */
-  async runInteraction(interaction: Interaction): Promise<InteractionResult> {
+  async runInteraction(
+    interaction: Interaction,
+    types: TypeRegistry = {},
+  ): Promise<InteractionResult> {
     let executed: string;
     try {
       executed = substituteBindings(interaction.command, this.bindings);
@@ -109,7 +113,7 @@ export class Runner {
     const actual = normalizeOutput(output, this.options.normalize);
 
     // recital asserts output, not exit status; the exit code is informational.
-    const match = matchBlock(interaction.expected, actual, this.bindings);
+    const match = matchBlock(interaction.expected, actual, this.bindings, types);
     if (!match.ok) {
       return {
         interaction,
@@ -130,7 +134,7 @@ export class Runner {
     const results: InteractionResult[] = [];
     let ok = true;
     for (const interaction of block.interactions) {
-      const result = await this.runInteraction(interaction);
+      const result = await this.runInteraction(interaction, block.types);
       results.push(result);
       if (!result.ok) {
         ok = false;

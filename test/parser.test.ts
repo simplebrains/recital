@@ -190,6 +190,7 @@ describe("parseMarkdown", () => {
   it("supports typed named and typed anonymous bind entries", () => {
     const named = parseMarkdown(
       [
+        "<!-- recital type: { uuid: \"[0-9a-f-]+\" } -->",
         "<!-- recital bind:",
         'id: { type: uuid, text: "the-id" }',
         "-->",
@@ -200,9 +201,11 @@ describe("parseMarkdown", () => {
       ].join("\n"),
     );
     expect(named.blocks[0]!.interactions[0]!.expected).toEqual(["{{id:uuid}}"]);
+    expect(named.blocks[0]!.types).toEqual({ uuid: "[0-9a-f-]+" });
 
     const anon = parseMarkdown(
       [
+        '<!-- recital type: { path: "[^\\\\s]+" } -->',
         "<!-- recital bind:",
         '- { type: path, text: "/tmp/x" }',
         "-->",
@@ -213,6 +216,92 @@ describe("parseMarkdown", () => {
       ].join("\n"),
     );
     expect(anon.blocks[0]!.interactions[0]!.expected).toEqual(["{{__recital_anon_0:path}}"]);
+  });
+
+  it("registers types and strips ^/$ anchors", () => {
+    const doc = parseMarkdown(
+      [
+        '<!-- recital type: { hex: "^[0-9a-f]+$" } -->',
+        "```console",
+        "$ true",
+        "```",
+      ].join("\n"),
+    );
+    expect(doc.blocks[0]!.types).toEqual({ hex: "[0-9a-f]+" });
+  });
+
+  it("rejects redefining any or an existing type", () => {
+    expect(() => parseMarkdown('<!-- recital type: { any: "x" } -->')).toThrow(/reserved/);
+    expect(() =>
+      parseMarkdown(
+        ['<!-- recital type: { hex: "a" } -->', '<!-- recital type: { hex: "b" } -->'].join(
+          "\n",
+        ),
+      ),
+    ).toThrow(/redefines/);
+  });
+
+  it("expands type-only bind into per-match anonymous identities", () => {
+    const doc = parseMarkdown(
+      [
+        '<!-- recital type: { doc_id: "d_[a-z0-9]{7}" } -->',
+        "<!-- recital bind: { type: doc_id } -->",
+        "```console",
+        "$ true",
+        "d_9f4k2qa",
+        "d_3xb7m0c",
+        "d_9f4k2qa",
+        "```",
+      ].join("\n"),
+    );
+    expect(doc.blocks[0]!.interactions[0]!.expected).toEqual([
+      "{{__recital_anon_1:doc_id}}",
+      "{{__recital_anon_2:doc_id}}",
+      "{{__recital_anon_1:doc_id}}",
+    ]);
+  });
+
+  it("lets an explicit text bind claim a value before type-only expansion", () => {
+    const doc = parseMarkdown(
+      [
+        '<!-- recital type: { doc_id: "d_[a-z0-9]{7}" } -->',
+        "<!-- recital bind:",
+        '- main: { type: doc_id, text: "d_9f4k2qa" }',
+        "- { type: doc_id }",
+        "-->",
+        "```console",
+        "$ true",
+        "d_9f4k2qa",
+        "d_3xb7m0c",
+        "```",
+      ].join("\n"),
+    );
+    expect(doc.blocks[0]!.interactions[0]!.expected).toEqual([
+      "{{main:doc_id}}",
+      "{{__recital_anon_1:doc_id}}",
+    ]);
+  });
+
+  it("rejects type-only bind with any", () => {
+    expect(() => parseMarkdown("<!-- recital bind: { type: any } -->")).toThrow(
+      /type-only bind with reserved type "any"/,
+    );
+  });
+
+  it("only applies types declared before a block", () => {
+    const doc = parseMarkdown(
+      [
+        "```console",
+        "$ true",
+        "```",
+        '<!-- recital type: { hex: "[0-9a-f]+" } -->',
+        "```console",
+        "$ true",
+        "```",
+      ].join("\n"),
+    );
+    expect(doc.blocks[0]!.types).toEqual({});
+    expect(doc.blocks[1]!.types).toEqual({ hex: "[0-9a-f]+" });
   });
 
   it("applies bind entries declared on a session directive", () => {

@@ -12,27 +12,44 @@
  *
  * A line consisting solely of `...` (or `{{...}}`) is a line-level ellipsis: it
  * matches zero or more arbitrary output lines.
+ *
+ * Aside from the reserved built-in `any`, token types are user-defined regex
+ * fragments declared with `<!-- recital type: … -->`.
  */
 
-import type { LineMatch, TokenType } from "./types.js";
+import type { LineMatch } from "./types.js";
+
+/** User-defined matcher type name → regex fragment. */
+export type TypeRegistry = Record<string, string>;
+
+/** Regex fragment for the reserved built-in type `any`. */
+export const ANY_PATTERN = ".+?";
+
+/**
+ * Strip a single leading `^` and trailing `$` so full-string-looking patterns
+ * still work as capture fragments inside a larger line regex.
+ */
+export function normalizeTypePattern(pattern: string): string {
+  let p = pattern;
+  if (p.startsWith("^")) p = p.slice(1);
+  if (p.endsWith("$")) p = p.slice(0, -1);
+  return p;
+}
+
+/** Resolve a type name to a regex fragment. */
+export function resolveTypePattern(type: string, types: TypeRegistry): string {
+  if (type === "any") return ANY_PATTERN;
+  const pattern = types[type];
+  if (pattern === undefined) {
+    const known = ["any", ...Object.keys(types)].join(", ");
+    throw new Error(
+      `Unknown matcher type "${type}". Declare it with \`recital type:\`. Known types: ${known}`,
+    );
+  }
+  return pattern;
+}
 
 export type Bindings = Record<string, string>;
-
-/** Regex source fragments for each supported token type. */
-const TYPE_PATTERNS: Record<TokenType, string> = {
-  any: ".+?",
-  word: "\\S+",
-  id: "[A-Za-z0-9_.:-]+",
-  uuid: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-  int: "-?\\d+",
-  number: "-?\\d+(?:\\.\\d+)?",
-  hex: "[0-9a-fA-F]+",
-  path: "[^\\s]+",
-  port: "\\d{1,5}",
-  timestamp:
-    "\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?)?",
-  email: "[^\\s@]+@[^\\s@]+\\.[^\\s@]+",
-};
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const TOKEN_RE = /\{\{\s*([^{}]*?)\s*\}\}/g;
@@ -42,16 +59,7 @@ const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 interface ParsedToken {
   kind: "anon" | "named";
   name?: string;
-  type: TokenType;
-}
-
-function assertType(type: string): TokenType {
-  if (!(type in TYPE_PATTERNS)) {
-    throw new Error(
-      `Unknown matcher type "${type}". Known types: ${Object.keys(TYPE_PATTERNS).join(", ")}`,
-    );
-  }
-  return type as TokenType;
+  type: string;
 }
 
 function parseTokenBody(body: string): ParsedToken {
@@ -59,14 +67,19 @@ function parseTokenBody(body: string): ParsedToken {
     return { kind: "anon", type: "any" };
   }
   if (body.startsWith(":")) {
-    return { kind: "anon", type: assertType(body.slice(1)) };
+    return { kind: "anon", type: body.slice(1) };
   }
   const colon = body.indexOf(":");
   const name = colon === -1 ? body : body.slice(0, colon);
-  const type = colon === -1 ? "any" : assertType(body.slice(colon + 1));
+  const type = colon === -1 ? "any" : body.slice(colon + 1);
   if (!IDENT_RE.test(name)) {
     throw new Error(
       `Invalid capture name "${name}" in token "{{${body}}}". Names must match ${IDENT_RE}.`,
+    );
+  }
+  if (type !== "any" && !IDENT_RE.test(type)) {
+    throw new Error(
+      `Invalid type name "${type}" in token "{{${body}}}". Types must match ${IDENT_RE}.`,
     );
   }
   return { kind: "named", name, type };
@@ -87,7 +100,11 @@ interface CompiledLine {
  * already in scope. Already-bound names are inlined as literals (enforcing
  * consistency); repeated names within the line become back-references.
  */
-export function compileLine(template: string, bindings: Bindings): CompiledLine {
+export function compileLine(
+  template: string,
+  bindings: Bindings,
+  types: TypeRegistry = {},
+): CompiledLine {
   let out = "^";
   let lastEnd = 0;
   const usedNames = new Set<string>();
@@ -97,7 +114,7 @@ export function compileLine(template: string, bindings: Bindings): CompiledLine 
   for (const m of template.matchAll(TOKEN_RE)) {
     out += escapeRegex(template.slice(lastEnd, m.index));
     const token = parseTokenBody(m[1]!.trim());
-    const pattern = TYPE_PATTERNS[token.type];
+    const pattern = resolveTypePattern(token.type, types);
 
     if (token.kind === "anon") {
       out += `(?:${pattern})`;
@@ -128,8 +145,9 @@ export function matchLine(
   template: string,
   actual: string,
   bindings: Bindings,
+  types: TypeRegistry = {},
 ): LineMatch {
-  const { regex, newNames } = compileLine(template, bindings);
+  const { regex, newNames } = compileLine(template, bindings, types);
   const m = regex.exec(actual);
   if (!m) return { ok: false, captures: {} };
   const captures: Record<string, string> = {};
@@ -159,6 +177,7 @@ export function matchBlock(
   expected: string[],
   actual: string[],
   bindings: Bindings,
+  types: TypeRegistry = {},
 ): BlockMatchResult {
   // Empty expectation: caller doesn't care about output.
   if (expected.length === 0) return { ok: true, bindings };
@@ -181,7 +200,7 @@ export function matchBlock(
       return null;
     }
     if (ai >= actual.length) return null;
-    const lm = matchLine(line, actual[ai]!, binds);
+    const lm = matchLine(line, actual[ai]!, binds, types);
     if (!lm.ok) return null;
     return go(ei + 1, ai + 1, { ...binds, ...lm.captures });
   }

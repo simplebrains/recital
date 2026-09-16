@@ -6,13 +6,14 @@
  *
  *   <!-- recital cmd: bash -->
  *   <!-- recital: { cmd: bash, syntax: console } -->
+ *   <!-- recital type: { hex: "[0-9a-f]+" } -->
  *   <!-- recital bind: "/tmp/x" -->
  *   <!-- recital include: ./setup.md -->
  *
  * Prefix sugar `<!-- recital <key>: <yaml> -->` desugars to `{ <key>: <yaml> }`.
- * A mapping with `cmd` is a file-global session directive; a mapping with only
- * `bind` is a positional literal-identity declaration. `include` is expanded
- * before parsing (see {@link expandIncludes}) and is not a session setting.
+ * A mapping with `cmd` is a file-global session directive; `type` declares named
+ * regex fragments; `bind` is a positional literal-identity declaration.
+ * `include` is expanded before parsing (see {@link expandIncludes}).
  *
  * Inside a block, `$ ` introduces a command; `> ` continues the previous
  * command; every other line up to the next command is that command's expected
@@ -25,6 +26,10 @@ import {
   expandIncludes,
   type ExpandIncludesOptions,
 } from "./include.js";
+import {
+  normalizeTypePattern,
+  type TypeRegistry,
+} from "./matcher.js";
 import type { Block, Interaction, ParsedDocument, RecitalDirective } from "./types.js";
 
 export interface ParseOptions extends ExpandIncludesOptions {
@@ -37,8 +42,11 @@ export interface IdentityDeclaration {
   /** The binding name — synthesized internally for anonymous declarations. */
   name: string;
   type?: string;
-  /** The literal placeholder string that stands in for the binding. */
-  text: string;
+  /**
+   * The literal placeholder string that stands in for the binding. Absent for
+   * type-only binds, which are expanded per block by scanning for type matches.
+   */
+  text?: string;
   /** Whether the name was synthesized (the declaration gave no name). */
   anonymous: boolean;
 }
@@ -47,8 +55,9 @@ const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/;
 const HEADING_RE = /^#{1,6}\s+(.*?)\s*#*\s*$/;
 /** Opening of a recital HTML comment: `<!-- recital:` or `<!-- recital key:`. */
 const RECITAL_OPEN_RE = /^\s*<!--\s*recital(?:\s+([A-Za-z_][A-Za-z0-9_]*))?:(.*)$/;
+const TYPE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const SESSION_KEYS = new Set([
+const COMMENT_KEYS = new Set([
   "cmd",
   "syntax",
   "pragma",
@@ -58,25 +67,141 @@ const SESSION_KEYS = new Set([
   "setup",
   "teardown",
   "bind",
+  "type",
+]);
+
+const SESSION_ONLY_KEYS = new Set([
+  "cmd",
+  "syntax",
+  "pragma",
+  "isolate",
+  "cwd",
+  "env",
+  "setup",
+  "teardown",
 ]);
 
 /** Rewrite declared identity placeholders into `{{name}}` / `{{name:type}}`. */
 function applyIdentities(text: string, declarations: IdentityDeclaration[]): string {
   let out = text;
-  const ordered = [...declarations].sort((a, b) => b.text.length - a.text.length);
+  const ordered = [...declarations]
+    .filter((d) => d.text)
+    .sort((a, b) => b.text!.length - a.text!.length);
   for (const decl of ordered) {
-    if (!decl.text) continue;
     const token = decl.type ? `{{${decl.name}:${decl.type}}}` : `{{${decl.name}}}`;
-    out = out.split(decl.text).join(token);
+    out = out.split(decl.text!).join(token);
   }
   return out;
+}
+
+/**
+ * Expand type-only bind directives into concrete anonymous identities by
+ * scanning the block body for matches of each type's pattern.
+ */
+function expandTypeOnlyBinds(
+  scanTexts: string[],
+  declarations: IdentityDeclaration[],
+  types: TypeRegistry,
+  nextAnon: () => string,
+  blockLine: number,
+): IdentityDeclaration[] {
+  const concrete = declarations.filter((d) => d.text !== undefined);
+  const typeOnly = declarations.filter((d) => d.text === undefined);
+  if (typeOnly.length === 0) return concrete;
+
+  const claimed = new Set(concrete.map((d) => d.text!));
+  const expanded = [...concrete];
+
+  for (const decl of typeOnly) {
+    const typeName = decl.type;
+    if (!typeName) {
+      throw new Error(
+        `recital bind for block on line ${blockLine} has a type-only entry without a type.`,
+      );
+    }
+    if (typeName === "any") {
+      throw new Error(
+        `recital bind for block on line ${blockLine} cannot use type-only bind with reserved type "any".`,
+      );
+    }
+    const pattern = types[typeName];
+    if (pattern === undefined) {
+      const known = ["any", ...Object.keys(types)].join(", ");
+      throw new Error(
+        `recital bind for block on line ${blockLine} references unknown type "${typeName}". ` +
+          `Declare it with \`recital type:\`. Known types: ${known}`,
+      );
+    }
+
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern, "g");
+    } catch (err) {
+      throw new Error(
+        `recital type "${typeName}" has invalid regex for block on line ${blockLine}: ${(err as Error).message}`,
+      );
+    }
+
+    const found = new Set<string>();
+    for (const text of scanTexts) {
+      re.lastIndex = 0;
+      for (const m of text.matchAll(re)) {
+        const match = m[0];
+        if (match && !claimed.has(match)) found.add(match);
+      }
+    }
+    for (const text of found) {
+      claimed.add(text);
+      expanded.push({
+        name: nextAnon(),
+        type: typeName,
+        text,
+        anonymous: true,
+      });
+    }
+  }
+
+  return expanded;
+}
+
+/** Collect command/expected text from a block body for type-only scanning. */
+function collectScanTexts(lines: { text: string; line: number }[]): string[] {
+  const texts: string[] = [];
+  let currentCmd: string | null = null;
+
+  for (const { text } of lines) {
+    const promptMatch = /^\$\s?(.*)$/.exec(text);
+    const contMatch = /^>\s?(.*)$/.exec(text);
+
+    if (promptMatch) {
+      if (currentCmd !== null) texts.push(currentCmd);
+      currentCmd = promptMatch[1]!;
+    } else if (contMatch && currentCmd !== null) {
+      currentCmd += "\n" + contMatch[1]!;
+    } else if (currentCmd !== null) {
+      texts.push(text);
+    }
+  }
+  if (currentCmd !== null) texts.push(currentCmd);
+  return texts;
 }
 
 /** Parse the body lines of a runnable block into ordered interactions. */
 function parseInteractions(
   lines: { text: string; line: number }[],
   declarations: IdentityDeclaration[],
+  types: TypeRegistry,
+  nextAnon: () => string,
+  blockLine: number,
 ): Interaction[] {
+  const expanded = expandTypeOnlyBinds(
+    collectScanTexts(lines),
+    declarations,
+    types,
+    nextAnon,
+    blockLine,
+  );
+
   const interactions: Interaction[] = [];
   let current: Interaction | null = null;
 
@@ -97,8 +222,8 @@ function parseInteractions(
 
   return interactions.map((it) => ({
     ...it,
-    command: applyIdentities(it.command, declarations),
-    expected: it.expected.map((l) => applyIdentities(l, declarations)),
+    command: applyIdentities(it.command, expanded),
+    expected: it.expected.map((l) => applyIdentities(l, expanded)),
   }));
 }
 
@@ -134,6 +259,40 @@ function matchDirective(
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Parse a `type:` mapping into normalized regex fragments. */
+function parseType(value: unknown, line: number, existing: TypeRegistry): TypeRegistry {
+  if (!isPlainObject(value)) {
+    throw new Error(`recital type on line ${line} must be a mapping of name → regex string.`);
+  }
+  const added: TypeRegistry = {};
+  for (const [name, pattern] of Object.entries(value)) {
+    if (!TYPE_NAME_RE.test(name)) {
+      throw new Error(
+        `recital type on line ${line} has invalid type name "${name}". Names must match ${TYPE_NAME_RE}.`,
+      );
+    }
+    if (name === "any") {
+      throw new Error(`recital type on line ${line} cannot redefine reserved type "any".`);
+    }
+    if (name in existing || name in added) {
+      throw new Error(`recital type on line ${line} redefines type "${name}".`);
+    }
+    if (typeof pattern !== "string" || !pattern) {
+      throw new Error(`recital type "${name}" on line ${line} must be a non-empty regex string.`);
+    }
+    const normalized = normalizeTypePattern(pattern);
+    try {
+      new RegExp(normalized);
+    } catch (err) {
+      throw new Error(
+        `recital type "${name}" on line ${line} has invalid regex: ${(err as Error).message}`,
+      );
+    }
+    added[name] = normalized;
+  }
+  return added;
 }
 
 function parseBindEntry(
@@ -178,11 +337,30 @@ function parseBindEntry(
     };
   }
 
+  // Type-only: { type: doc_id } — scan blocks for matches of that type.
+  // Exact shape `{ type: <string> }` only (named shorthand `type: "/path"` is
+  // ambiguous; use `{ name: type, text: "…" }` for a binding named "type").
+  if (Object.keys(entry).length === 1 && typeof entry.type === "string") {
+    if (!entry.type) {
+      throw new Error(`recital bind entry on line ${line} has empty type.`);
+    }
+    if (entry.type === "any") {
+      throw new Error(
+        `recital bind entry on line ${line} cannot use type-only bind with reserved type "any".`,
+      );
+    }
+    return {
+      name: nextAnon(),
+      type: entry.type,
+      anonymous: true,
+    };
+  }
+
   // Single-key sugar: name: "…"  or  name: { type, text }
   const keys = Object.keys(entry);
   if (keys.length !== 1) {
     throw new Error(
-      `recital bind entry on line ${line} must be a string, { text, … }, or a single-key name mapping.`,
+      `recital bind entry on line ${line} must be a string, { text, … }, { type }, or a single-key name mapping.`,
     );
   }
   const name = keys[0]!;
@@ -224,7 +402,11 @@ function parseBind(
     return value.map((entry) => parseBindEntry(entry, line, nextAnon));
   }
   // Named shorthand: { workdir: "/tmp/x", answer: { type: int, text: "42" } }
+  // Also accepts type-only when the mapping is exactly { type: <typename> }.
   if (isPlainObject(value)) {
+    if (Object.keys(value).length === 1 && typeof value.type === "string") {
+      return [parseBindEntry(value, line, nextAnon)];
+    }
     return Object.entries(value).map(([name, v]) =>
       parseBindEntry({ [name]: v }, line, nextAnon),
     );
@@ -252,12 +434,17 @@ function parseSessionMapping(
   map: Record<string, unknown>,
   line: number,
   nextAnon: () => string,
-): { directive: RecitalDirective; identities: IdentityDeclaration[] } {
-  const unknown = Object.keys(map).filter((k) => !SESSION_KEYS.has(k));
+  typeRegistry: TypeRegistry,
+): {
+  directive: RecitalDirective;
+  identities: IdentityDeclaration[];
+  types: TypeRegistry;
+} {
+  const unknown = Object.keys(map).filter((k) => !COMMENT_KEYS.has(k));
   if (unknown.length) {
     throw new Error(
       `recital directive on line ${line} has unknown field(s): ${unknown.join(", ")}. ` +
-        `Known fields: ${[...SESSION_KEYS].join(", ")}.`,
+        `Known fields: ${[...COMMENT_KEYS].join(", ")}.`,
     );
   }
 
@@ -316,12 +503,16 @@ function parseSessionMapping(
     teardown = map.teardown;
   }
 
+  const types =
+    map.type !== undefined ? parseType(map.type, line, typeRegistry) : {};
+
   const identities =
     map.bind !== undefined ? parseBind(map.bind, line, nextAnon) : [];
 
   return {
     directive: { cmd, syntax, pragma, isolate, cwd, env, setup, teardown, line },
     identities,
+    types,
   };
 }
 
@@ -379,9 +570,16 @@ function classifyComment(
   map: Record<string, unknown>,
   line: number,
   nextAnon: () => string,
+  typeRegistry: TypeRegistry,
 ):
-  | { kind: "session"; directive: RecitalDirective; identities: IdentityDeclaration[] }
-  | { kind: "bind"; identities: IdentityDeclaration[] } {
+  | {
+      kind: "session";
+      directive: RecitalDirective;
+      identities: IdentityDeclaration[];
+      types: TypeRegistry;
+    }
+  | { kind: "bind"; identities: IdentityDeclaration[]; types: TypeRegistry }
+  | { kind: "type"; types: TypeRegistry } {
   const keys = Object.keys(map);
   if (keys.length === 0) {
     throw new Error(`recital comment on line ${line} is empty.`);
@@ -394,21 +592,22 @@ function classifyComment(
     );
   }
 
-  const unknown = keys.filter((k) => !SESSION_KEYS.has(k));
+  const unknown = keys.filter((k) => !COMMENT_KEYS.has(k));
   if (unknown.length) {
     throw new Error(
       `recital comment on line ${line} has unknown field(s): ${unknown.join(", ")}. ` +
-        `Known fields: ${[...SESSION_KEYS].join(", ")}, include.`,
+        `Known fields: ${[...COMMENT_KEYS].join(", ")}, include.`,
     );
   }
 
   if ("cmd" in map) {
-    const { directive, identities } = parseSessionMapping(map, line, nextAnon);
-    return { kind: "session", directive, identities };
+    return {
+      kind: "session",
+      ...parseSessionMapping(map, line, nextAnon, typeRegistry),
+    };
   }
 
-  // Prefix sugar does not merge across comments: session keys without cmd fail.
-  const sessionOnly = keys.filter((k) => k !== "bind");
+  const sessionOnly = keys.filter((k) => SESSION_ONLY_KEYS.has(k));
   if (sessionOnly.length) {
     throw new Error(
       `recital comment on line ${line} has session field(s) ${sessionOnly.join(", ")} ` +
@@ -416,13 +615,22 @@ function classifyComment(
     );
   }
 
-  if (!("bind" in map)) {
+  const types =
+    map.type !== undefined ? parseType(map.type, line, typeRegistry) : {};
+  const identities =
+    map.bind !== undefined ? parseBind(map.bind, line, nextAnon) : [];
+
+  if (!("type" in map) && !("bind" in map)) {
     throw new Error(
-      `recital comment on line ${line} must declare cmd (session) or bind (identities).`,
+      `recital comment on line ${line} must declare cmd (session), type, or bind.`,
     );
   }
 
-  return { kind: "bind", identities: parseBind(map.bind, line, nextAnon) };
+  if (!("bind" in map)) {
+    return { kind: "type", types };
+  }
+
+  return { kind: "bind", identities, types };
 }
 
 interface RawBlock {
@@ -432,6 +640,7 @@ interface RawBlock {
   line: number;
   heading?: string;
   declarations: IdentityDeclaration[];
+  types: TypeRegistry;
 }
 
 /** Parse a Markdown document into directives and code blocks. */
@@ -443,6 +652,7 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
 
   let lastHeading: string | undefined;
   const declarations: IdentityDeclaration[] = [];
+  let typeRegistry: TypeRegistry = {};
   let anonCount = 0;
   const nextAnon = () => `__recital_anon_${anonCount++}`;
   let i = 0;
@@ -454,11 +664,14 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
     if (!fence) {
       if (RECITAL_OPEN_RE.test(raw)) {
         const { map, endIdx, line } = readRecitalComment(lines, i);
-        const classified = classifyComment(map, line, nextAnon);
+        const classified = classifyComment(map, line, nextAnon, typeRegistry);
+        if (Object.keys(classified.types).length) {
+          typeRegistry = { ...typeRegistry, ...classified.types };
+        }
         if (classified.kind === "session") {
           declarations.push(...classified.identities);
           directives.push(classified.directive);
-        } else {
+        } else if (classified.kind === "bind") {
           declarations.push(...classified.identities);
         }
         i = endIdx + 1;
@@ -492,16 +705,24 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
       line: openLine,
       heading: lastHeading,
       declarations: [...declarations],
+      types: { ...typeRegistry },
     });
   }
 
   const blocks: Block[] = rawBlocks.map((rb) => ({
     lang: rb.lang,
     pragma: rb.pragma,
-    interactions: parseInteractions(rb.body, rb.declarations),
+    interactions: parseInteractions(
+      rb.body,
+      rb.declarations,
+      rb.types,
+      nextAnon,
+      rb.line,
+    ),
     line: rb.line,
     heading: rb.heading,
     directive: matchDirective(rb.lang, rb.pragma, directives, rb.line),
+    types: rb.types,
   }));
 
   return { path: opts.path ?? "<inline>", directives, blocks };

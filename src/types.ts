@@ -66,6 +66,12 @@ export interface Block {
    * matching directive are not interpreted by recital.
    */
   directive?: RecitalDirective;
+  /**
+   * Matcher type registry in scope at this block (user-defined regex fragments
+   * declared by preceding `recital type:` comments). The built-in `any` is
+   * always available and is not stored here.
+   */
+  types: Record<string, string>;
 }
 
 /** A parsed Markdown document. */
@@ -77,20 +83,6 @@ export interface ParsedDocument {
   /** Every fenced code block found in the document, in order. */
   blocks: Block[];
 }
-
-/** The set of matcher token type names understood in expectation templates. */
-export type TokenType =
-  | "any"
-  | "id"
-  | "uuid"
-  | "int"
-  | "number"
-  | "word"
-  | "path"
-  | "port"
-  | "timestamp"
-  | "hex"
-  | "email";
 
 /** Result of matching one expected line against one actual line. */
 export interface LineMatch {

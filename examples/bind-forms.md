@@ -25,6 +25,7 @@ A later comment can add more identities. A sequence may mix a named string
 and a typed anonymous `{ type, text }` entry (named typed mappings are in
 `identity-comments.md`).
 
+<!-- recital type: { int: "-?\\d+" } -->
 <!-- recital bind:
 - n: "7"
 - { type: int, text: "99" }

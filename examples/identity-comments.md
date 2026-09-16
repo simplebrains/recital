@@ -30,10 +30,11 @@ anything.
 ## Naming or typing an identity
 
 If it helps the prose to name the value, use a mapping entry; nest `type` and
-`text` to constrain what it may capture (here, an integer). The value is
-captured the first time it appears in *output*, then reused everywhere after —
-including inside later commands:
+`text` to constrain what it may capture. Declare the type first (here, an
+integer). The value is captured the first time it appears in *output*, then
+reused everywhere after — including inside later commands:
 
+<!-- recital type: { int: "-?\\d+" } -->
 <!-- recital bind:
 answer:
   type: int

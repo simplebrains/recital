@@ -5,6 +5,10 @@ Write a Markdown file that *looks* like a terminal session, and run it — a
 read, and an executable test a machine can verify.
 
 <!-- recital: { cmd: bash, syntax: console } -->
+<!-- recital type:
+path: "[^\\s]+"
+uuid: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+-->
 
 ```console
 $ echo hello
@@ -67,6 +71,7 @@ belong to it:
 | `setup`     | Shell snippet run once when the session starts.                         |
 | `teardown`  | Shell snippet always run when the session ends.                         |
 | `bind`      | Optional literal-identity set declared at this point (see below).       |
+| `type`      | Optional named regex fragments for matcher tokens (see below).          |
 
 Directives are **file-global**: every code block is matched against all of them.
 A block that matches no directive is left alone; a block that matches *more than
@@ -153,6 +158,20 @@ a command* — must be that same value. This is stronger than a wildcard: a
 wildcard says "anything here," a capture says "anything here, but consistent
 everywhere it recurs."
 
+Aside from the reserved built-in `any` (`.+?`), types are **user-defined**
+regex fragments declared with `type:`:
+
+````markdown
+<!-- recital type:
+uuid: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+path: "[^\\s]+"
+-->
+````
+
+Patterns are fragments spliced into a line regex. A leading `^` and trailing
+`$` are stripped, so `^[0-9a-f]+$` and `[0-9a-f]+` are equivalent. Types
+accumulate positionally from the comment forward (including via includes).
+
 ```console
 $ echo "created 3f2504e0-4f89-41d3-9a0c-0305e82c3301"
 created {{id:uuid}}
@@ -160,10 +179,9 @@ $ echo "fetching {{id}}"
 fetching {{id}}
 ```
 
-Built-in types: `any`, `word`, `id`, `uuid`, `int`, `number`, `hex`, `path`,
-`port`, `timestamp`, `email`. Output is normalized before matching (newlines
-canonicalized, ANSI colour stripped, trailing whitespace and surrounding blank
-lines trimmed). Captured bindings are per session.
+Output is normalized before matching (newlines canonicalized, ANSI colour
+stripped, trailing whitespace and surrounding blank lines trimmed). Captured
+bindings are per session.
 
 ### Keeping the transcript literal
 
@@ -195,6 +213,7 @@ follow them:
 ````markdown
 <!-- recital bind: "/tmp/a" -->
 
+<!-- recital type: { uuid: "[0-9a-fA-F-]+", int: "-?\\d+" } -->
 <!-- recital bind:
 - "/tmp/a"
 - workdir: "/tmp/b"
@@ -206,6 +225,14 @@ answer:
   type: int
   text: "42"
 -->
+````
+
+When many distinct values share one shape, bind **by type alone** — every
+distinct substring matching that type becomes its own anonymous identity:
+
+````markdown
+<!-- recital type: { doc_id: "d_[a-z0-9]{7}" } -->
+<!-- recital bind: { type: doc_id } -->
 ````
 
 ## Running from the CLI
