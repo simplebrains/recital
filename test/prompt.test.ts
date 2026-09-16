@@ -59,6 +59,34 @@ describe("prompt-mode documents", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("accepts the prompt itself as the command marker (verbatim REPL transcript)", async () => {
+    const doc = [
+      `<!-- recital: { cmd: "${CMD}", prompt: "calc> " } -->`,
+      "```console",
+      "calc> 1 + 1",
+      "2",
+      "calc> 6 * 7",
+      "42",
+      "```",
+    ].join("\n");
+    const result = await runDocument(doc);
+    expect(result.ok).toBe(true);
+  });
+
+  it("mixes the prompt marker and `$` freely", async () => {
+    const doc = [
+      `<!-- recital: { cmd: "${CMD}", prompt: "calc> " } -->`,
+      "```console",
+      "calc> 1 + 1",
+      "2",
+      "$ 6 * 7",
+      "42",
+      "```",
+    ].join("\n");
+    const result = await runDocument(doc);
+    expect(result.ok).toBe(true);
+  });
+
   it("reports a mismatch like any other session", async () => {
     const doc = [
       `<!-- recital: { cmd: "${CMD}", prompt: "calc> " } -->`,

@@ -91,24 +91,26 @@ client, an app's own `> ` prompt). For those, give the directive a `prompt`:
 <!-- recital: { cmd: "python3 -i -q", prompt: ">>> ", syntax: console } -->
 
 ```console
-$ 1 + 1
+>>> 1 + 1
 2
-$ "ab" * 3
+>>> "ab" * 3
 'ababab'
 ```
 ````
 
 With `prompt` set, recital launches `cmd` as a REPL and treats the **prompt
 reappearing** as the end-of-command signal — the one assumption that holds for
-an arbitrary REPL. Commands are still written with the usual `$ ` marker; the
-program's own prompt is what recital watches for, not something you type.
+an arbitrary REPL. In prompt mode the prompt itself is also a **command marker**,
+so a transcript can read exactly as the user sees it (`>>> 1 + 1`); the usual
+`$ ` marker keeps working too, and the two may be mixed.
 
 Details and constraints:
 
-- `cmd` is launched via `bash -c '<setup>; exec <cmd> 2>&1'`, so a `setup`
-  snippet still runs (in bash) and its `cd`/exports carry into the REPL, and the
-  REPL's stderr (where many REPLs print the prompt) is folded into stdout in
-  order. `teardown` is not run in prompt mode (the REPL replaces the shell); use
+- `cmd` is launched via `bash -c 'exec 2>&1; <setup>; exec <cmd>'`, so a `setup`
+  snippet still runs (in bash) and its `cd`/exports carry into the REPL, and all
+  output — setup's and the REPL's (where many print the prompt to stderr) — is
+  folded onto one ordered stream. `teardown` is not run in prompt mode (the REPL
+  replaces the shell); use
   `cwd: temp` for cleanup.
 - The program must print `prompt` when it is ready for input — including once at
   startup. REPLs that only prompt on a TTY may need a flag to force it

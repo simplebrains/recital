@@ -166,18 +166,38 @@ function expandTypeOnlyBinds(
   return expanded;
 }
 
+const CONTINUATION_RE = /^>\s?(.*)$/;
+const DOLLAR_COMMAND_RE = /^\$\s?(.*)$/;
+
+/**
+ * Detect a command line and return its text (without the marker), or null.
+ *
+ * `$ cmd` always marks a command. In prompt mode the session's prompt is also a
+ * command marker, so a REPL transcript can be written exactly as the user sees
+ * it — `omg> query …` rather than `$ query …`. (A prompt of `> ` would shadow
+ * the `>` continuation marker; don't use one.)
+ */
+function matchCommandLine(text: string, prompt?: string): string | null {
+  if (prompt && text.startsWith(prompt)) return text.slice(prompt.length);
+  const m = DOLLAR_COMMAND_RE.exec(text);
+  return m ? m[1]! : null;
+}
+
 /** Collect command/expected text from a block body for type-only scanning. */
-function collectScanTexts(lines: { text: string; line: number }[]): string[] {
+function collectScanTexts(
+  lines: { text: string; line: number }[],
+  prompt?: string,
+): string[] {
   const texts: string[] = [];
   let currentCmd: string | null = null;
 
   for (const { text } of lines) {
-    const promptMatch = /^\$\s?(.*)$/.exec(text);
-    const contMatch = /^>\s?(.*)$/.exec(text);
+    const cmd = matchCommandLine(text, prompt);
+    const contMatch = CONTINUATION_RE.exec(text);
 
-    if (promptMatch) {
+    if (cmd !== null) {
       if (currentCmd !== null) texts.push(currentCmd);
-      currentCmd = promptMatch[1]!;
+      currentCmd = cmd;
     } else if (contMatch && currentCmd !== null) {
       currentCmd += "\n" + contMatch[1]!;
     } else if (currentCmd !== null) {
@@ -195,9 +215,10 @@ function parseInteractions(
   types: TypeRegistry,
   nextAnon: () => string,
   blockLine: number,
+  prompt?: string,
 ): Interaction[] {
   const expanded = expandTypeOnlyBinds(
-    collectScanTexts(lines),
+    collectScanTexts(lines, prompt),
     declarations,
     types,
     nextAnon,
@@ -208,12 +229,12 @@ function parseInteractions(
   let current: Interaction | null = null;
 
   for (const { text, line } of lines) {
-    const promptMatch = /^\$\s?(.*)$/.exec(text);
-    const contMatch = /^>\s?(.*)$/.exec(text);
+    const cmd = matchCommandLine(text, prompt);
+    const contMatch = CONTINUATION_RE.exec(text);
 
-    if (promptMatch) {
+    if (cmd !== null) {
       if (current) interactions.push(current);
-      current = { command: promptMatch[1]!, expected: [], line };
+      current = { command: cmd, expected: [], line };
     } else if (contMatch && current && current.expected.length === 0) {
       current.command += "\n" + contMatch[1]!;
     } else if (current) {
@@ -719,21 +740,27 @@ export function parseMarkdown(source: string, opts: ParseOptions = {}): ParsedDo
     });
   }
 
-  const blocks: Block[] = rawBlocks.map((rb) => ({
-    lang: rb.lang,
-    pragma: rb.pragma,
-    interactions: parseInteractions(
-      rb.body,
-      rb.declarations,
-      rb.types,
-      nextAnon,
-      rb.line,
-    ),
-    line: rb.line,
-    heading: rb.heading,
-    directive: matchDirective(rb.lang, rb.pragma, directives, rb.line),
-    types: rb.types,
-  }));
+  const blocks: Block[] = rawBlocks.map((rb) => {
+    // Resolve the owning directive first: in prompt mode its prompt doubles as a
+    // command marker, so the transcript reads like the real REPL (`omg> …`).
+    const directive = matchDirective(rb.lang, rb.pragma, directives, rb.line);
+    return {
+      lang: rb.lang,
+      pragma: rb.pragma,
+      interactions: parseInteractions(
+        rb.body,
+        rb.declarations,
+        rb.types,
+        nextAnon,
+        rb.line,
+        directive?.prompt,
+      ),
+      line: rb.line,
+      heading: rb.heading,
+      directive,
+      types: rb.types,
+    };
+  });
 
   return { path: opts.path ?? "<inline>", directives, blocks };
 }
