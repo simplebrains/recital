@@ -24,7 +24,7 @@ import {
   type TypeRegistry,
 } from "./matcher.js";
 import { parseMarkdown, type ParseOptions } from "./parser.js";
-import { ShellSession, type ShellOptions } from "./shell.js";
+import { PromptSession, ShellSession, type Session, type ShellOptions } from "./shell.js";
 import type {
   Block,
   BlockResult,
@@ -38,6 +38,13 @@ import type {
 export interface RunnerOptions extends ShellOptions {
   /** Output normalization options. */
   normalize?: NormalizeOptions;
+  /**
+   * When set, drive the session as an interactive REPL synced on this prompt
+   * (see {@link PromptSession}) instead of a bash-sentinel shell.
+   */
+  prompt?: string;
+  /** Bash snippet run before the REPL starts (prompt mode only). */
+  setup?: string;
 }
 
 function formatMismatch(
@@ -65,13 +72,22 @@ function formatMismatch(
  * it in sequence share working directory, environment, and captured bindings.
  */
 export class Runner {
-  readonly session: ShellSession;
+  readonly session: Session;
   bindings: Bindings = {};
   private readonly options: RunnerOptions;
 
   constructor(options: RunnerOptions = {}) {
     this.options = options;
-    this.session = new ShellSession(options);
+    this.session =
+      options.prompt !== undefined
+        ? new PromptSession({
+            shell: options.shell,
+            cwd: options.cwd,
+            env: options.env,
+            prompt: options.prompt,
+            setup: options.setup,
+          })
+        : new ShellSession(options);
   }
 
   /** Run one interaction against the current session and bindings. */
@@ -188,15 +204,23 @@ export class DirectiveSession {
     }
 
     const env = { ...options.env, ...directive.env };
+    // Prompt mode drives a REPL, not a bash shell: `setup` can't be run as a
+    // post-start command (the REPL wouldn't understand it), so it is handed to
+    // the PromptSession, which runs it in the launching bash before exec'ing the
+    // REPL. `teardown` is likewise not a REPL command, so it is not run.
+    const promptMode = directive.prompt !== undefined;
     const runner = new Runner({
       ...options,
       shell: directive.cmd,
       cwd,
       env,
+      prompt: directive.prompt,
+      setup: promptMode ? directive.setup : undefined,
     });
 
-    const session = new DirectiveSession(runner, tempDir, directive.teardown);
-    if (directive.setup) {
+    const teardown = promptMode ? undefined : directive.teardown;
+    const session = new DirectiveSession(runner, tempDir, teardown);
+    if (directive.setup && !promptMode) {
       try {
         const result = await runner.session.run(directive.setup);
         if (result.exitCode !== 0) {

@@ -59,6 +59,7 @@ const TYPE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const COMMENT_KEYS = new Set([
   "cmd",
+  "prompt",
   "syntax",
   "pragma",
   "isolate",
@@ -72,6 +73,7 @@ const COMMENT_KEYS = new Set([
 
 const SESSION_ONLY_KEYS = new Set([
   "cmd",
+  "prompt",
   "syntax",
   "pragma",
   "isolate",
@@ -453,6 +455,14 @@ function parseSessionMapping(
     throw new Error(`recital directive on line ${line} is missing required field cmd.`);
   }
 
+  let prompt: string | undefined;
+  if (map.prompt !== undefined) {
+    if (typeof map.prompt !== "string" || !map.prompt) {
+      throw new Error(`recital prompt on line ${line} must be a non-empty string.`);
+    }
+    prompt = map.prompt;
+  }
+
   let syntax: string | undefined;
   if (map.syntax !== undefined) {
     if (typeof map.syntax !== "string") {
@@ -510,7 +520,7 @@ function parseSessionMapping(
     map.bind !== undefined ? parseBind(map.bind, line, nextAnon) : [];
 
   return {
-    directive: { cmd, syntax, pragma, isolate, cwd, env, setup, teardown, line },
+    directive: { cmd, prompt, syntax, pragma, isolate, cwd, env, setup, teardown, line },
     identities,
     types,
   };

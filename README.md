@@ -63,6 +63,7 @@ belong to it:
 | Field       | Meaning                                                                 |
 | ----------- | ----------------------------------------------------------------------- |
 | `cmd`       | **Required.** Command used to drive the session (e.g. `bash`).          |
+| `prompt`    | Drive `cmd` as an interactive REPL, syncing on this prompt string (see [Driving a REPL](#driving-a-repl)). |
 | `syntax`    | Only match blocks fenced with this language.                            |
 | `pragma`    | Only match blocks whose fence **pragma** contains this string.          |
 | `isolate`   | Run each matching block in its own fresh session.                       |
@@ -78,6 +79,42 @@ A block that matches no directive is left alone; a block that matches *more than
 one* is an error (make the selectors disjoint). Prefix sugar does **not** merge
 across comments — `<!-- recital cmd: bash -->` and `<!-- recital syntax: console -->`
 are two separate comments, and the second errors (session fields without `cmd`).
+
+### Driving a REPL
+
+By default recital drives a bash-like shell: it feeds each command over stdin
+and delimits the output with an injected sentinel. That can't drive a program
+that reads its **own** stdin — an interactive REPL (a language shell, a database
+client, an app's own `> ` prompt). For those, give the directive a `prompt`:
+
+````markdown
+<!-- recital: { cmd: "python3 -i -q", prompt: ">>> ", syntax: console } -->
+
+```console
+$ 1 + 1
+2
+$ "ab" * 3
+'ababab'
+```
+````
+
+With `prompt` set, recital launches `cmd` as a REPL and treats the **prompt
+reappearing** as the end-of-command signal — the one assumption that holds for
+an arbitrary REPL. Commands are still written with the usual `$ ` marker; the
+program's own prompt is what recital watches for, not something you type.
+
+Details and constraints:
+
+- `cmd` is launched via `bash -c '<setup>; exec <cmd> 2>&1'`, so a `setup`
+  snippet still runs (in bash) and its `cd`/exports carry into the REPL, and the
+  REPL's stderr (where many REPLs print the prompt) is folded into stdout in
+  order. `teardown` is not run in prompt mode (the REPL replaces the shell); use
+  `cwd: temp` for cleanup.
+- The program must print `prompt` when it is ready for input — including once at
+  startup. REPLs that only prompt on a TTY may need a flag to force it
+  (`python3 -i`, `node -i`, `bash --norc -i` with a set `PS1`, …).
+- Output is matched exactly as in any session; a leading echoed copy of the
+  command (some shells echo the line they read on a pipe) is stripped.
 
 ### More than one session
 
@@ -281,10 +318,11 @@ result.ok; // true
 
 ## Notes & limitations
 
-- The runner drives a shell (via `cmd`) by feeding commands over stdin and
-  delimiting output with a random sentinel. Commands that **read from stdin**
-  interactively (e.g. a bare `cat`) will consume that framing and are not
-  supported — pipe input in instead.
+- The default (bash-sentinel) runner drives a shell by feeding commands over
+  stdin and delimiting output with a random sentinel. Commands that **read from
+  stdin** interactively (e.g. a bare `cat`) will consume that framing and are not
+  supported — pipe input in instead, or drive the program as a REPL with
+  [`prompt`](#driving-a-repl).
 - stderr is merged into stdout in program order (`exec 2>&1`).
 
 ## Licence
